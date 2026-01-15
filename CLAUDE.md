@@ -19,7 +19,7 @@ uv run main.py --config
 uv run main.py
 ```
 
-Dependencies are managed via PEP 723 inline script metadata in `main.py`. The `uv` tool automatically handles dependency installation.
+Dependencies are managed in `pyproject.toml`. Use `uv sync` to install dependencies, or `uv run` which automatically syncs before running.
 
 ## Architecture
 

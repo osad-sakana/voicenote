@@ -9,10 +9,16 @@
 
 ## インストール
 
-uvをインストールしていない場合は、まずインストールします:
+1. uvをインストールしていない場合は、まずインストールします:
 
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+2. 依存関係をインストールします:
+
+```bash
+uv sync
 ```
 
 ## 使い方
@@ -24,6 +30,8 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 ```bash
 uv run main.py
 ```
+
+> `uv run` は実行前に自動的に依存関係を同期します。
 
 以下の項目を入力します:
 - Obsidian Vaultの絶対パス
@@ -77,6 +85,7 @@ voicenote/
 ├── recorder.py          # 録音機能モジュール
 ├── transcriber.py       # 文字起こし機能モジュール
 ├── obsidian.py          # Obsidian保存機能モジュール
+├── pyproject.toml       # プロジェクト設定・依存関係
 ├── config.json          # 設定ファイル（自動生成）
 ├── .gitignore
 └── README.md

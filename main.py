@@ -3,16 +3,6 @@
 録音・文字起こしツール
 ローカルで音声を録音し、faster-whisperで文字起こしを行い、Obsidianに保存する。
 """
-# /// script
-# requires-python = ">=3.10"
-# dependencies = [
-#     "faster-whisper",
-#     "sounddevice",
-#     "scipy",
-#     "numpy",
-#     "rich",
-# ]
-# ///
 
 import argparse
 from pathlib import Path

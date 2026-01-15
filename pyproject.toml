@@ -1,0 +1,13 @@
+[project]
+name = "voicenote"
+version = "0.1.0"
+description = "Local voice recording and transcription tool for Obsidian"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "faster-whisper",
+    "sounddevice",
+    "scipy",
+    "numpy",
+    "rich",
+]
