@@ -1,4 +1,4 @@
-# 録音・文字起こしツール
+# voicenote
 
 ローカルで音声を録音し、faster-whisperで文字起こしを行い、Obsidianに保存するPythonツールです。
 
@@ -71,7 +71,7 @@ tags:
 ## プロジェクト構造
 
 ```
-recordnote/
+voicenote/
 ├── main.py              # メインエントリーポイント
 ├── config.py            # 設定管理モジュール
 ├── recorder.py          # 録音機能モジュール
