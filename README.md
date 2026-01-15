@@ -1,0 +1,82 @@
+# 録音・文字起こしツール
+
+ローカルで音声を録音し、faster-whisperで文字起こしを行い、Obsidianに保存するPythonツールです。
+
+## 必要要件
+
+- Python 3.10以上
+- [uv](https://github.com/astral-sh/uv)（Pythonパッケージマネージャー）
+
+## インストール
+
+uvをインストールしていない場合は、まずインストールします:
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+## 使い方
+
+### 初回実行
+
+初回実行時は設定を対話的に入力します:
+
+```bash
+uv run record_transcribe.py
+```
+
+以下の項目を入力します:
+- Obsidian Vaultの絶対パス
+- 保存先フォルダ名（Vault内の相対パス）
+- 使用するWhisperモデル（tiny, base, small, medium, large-v3）
+
+### 2回目以降
+
+設定が保存されているので、すぐに録音が開始されます:
+
+```bash
+uv run record_transcribe.py
+```
+
+録音中に `Ctrl+C` を押すと録音が終了し、文字起こしが開始されます。
+
+### 設定の再入力
+
+設定を変更したい場合は `--config` オプションを使用します:
+
+```bash
+uv run record_transcribe.py --config
+```
+
+## 出力形式
+
+文字起こし結果は以下の形式でObsidianに保存されます:
+
+```markdown
+---
+created: 2026-01-16T12:34:56.789012
+type: transcription
+tags:
+  - recording
+  - raw
+---
+
+# 録音文字起こし
+
+[文字起こし結果]
+```
+
+ファイル名: `YYYY-MM-DD_HHMMSS_raw.md`
+
+## 機能
+
+- ✅ ローカルで完結（外部APIを使用しない）
+- ✅ 対話的な設定管理
+- ✅ リアルタイム録音
+- ✅ faster-whisperによる高精度な文字起こし
+- ✅ Obsidianへの自動保存（フロントマター付き）
+- ✅ Richライブラリによる美しいUI
+
+## ライセンス
+
+MIT
