@@ -22,7 +22,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 初回実行時は設定を対話的に入力します:
 
 ```bash
-uv run record_transcribe.py
+uv run main.py
 ```
 
 以下の項目を入力します:
@@ -35,7 +35,7 @@ uv run record_transcribe.py
 設定が保存されているので、すぐに録音が開始されます:
 
 ```bash
-uv run record_transcribe.py
+uv run main.py
 ```
 
 録音中に `Ctrl+C` を押すと録音が終了し、文字起こしが開始されます。
@@ -45,7 +45,7 @@ uv run record_transcribe.py
 設定を変更したい場合は `--config` オプションを使用します:
 
 ```bash
-uv run record_transcribe.py --config
+uv run main.py --config
 ```
 
 ## 出力形式
@@ -72,10 +72,10 @@ tags:
 
 ```
 recordnote/
-├── record_transcribe.py  # メインエントリーポイント
-├── config.py             # 設定管理モジュール
-├── recorder.py           # 録音機能モジュール
-├── transcriber.py        # 文字起こし機能モジュール
+├── main.py              # メインエントリーポイント
+├── config.py            # 設定管理モジュール
+├── recorder.py          # 録音機能モジュール
+├── transcriber.py       # 文字起こし機能モジュール
 ├── obsidian.py          # Obsidian保存機能モジュール
 ├── config.json          # 設定ファイル（自動生成）
 ├── .gitignore
@@ -91,7 +91,3 @@ recordnote/
 - ✅ Obsidianへの自動保存（フロントマター付き）
 - ✅ Richライブラリによる美しいUI
 - ✅ モジュール化された綺麗なコード構造
-
-## ライセンス
-
-MIT
