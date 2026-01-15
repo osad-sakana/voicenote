@@ -68,6 +68,20 @@ tags:
 
 ファイル名: `YYYY-MM-DD_HHMMSS_raw.md`
 
+## プロジェクト構造
+
+```
+recordnote/
+├── record_transcribe.py  # メインエントリーポイント
+├── config.py             # 設定管理モジュール
+├── recorder.py           # 録音機能モジュール
+├── transcriber.py        # 文字起こし機能モジュール
+├── obsidian.py          # Obsidian保存機能モジュール
+├── config.json          # 設定ファイル（自動生成）
+├── .gitignore
+└── README.md
+```
+
 ## 機能
 
 - ✅ ローカルで完結（外部APIを使用しない）
@@ -76,6 +90,7 @@ tags:
 - ✅ faster-whisperによる高精度な文字起こし
 - ✅ Obsidianへの自動保存（フロントマター付き）
 - ✅ Richライブラリによる美しいUI
+- ✅ モジュール化された綺麗なコード構造
 
 ## ライセンス
 
