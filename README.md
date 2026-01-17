@@ -21,6 +21,29 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 uv sync
 ```
 
+### グローバルインストール（オプション）
+
+`uv tool`を使うと、システム全体で`voicenote`コマンドとして使用できます:
+
+```bash
+uv tool install . --python 3.12
+```
+
+> Python 3.14以降では依存関係がサポートされていないため、3.12または3.13を指定してください。
+
+インストール後は、どこからでも実行可能です:
+
+```bash
+voicenote           # 録音開始
+voicenote --config  # 設定変更
+```
+
+アンインストールする場合:
+
+```bash
+uv tool uninstall voicenote
+```
+
 ## 使い方
 
 ### 初回実行

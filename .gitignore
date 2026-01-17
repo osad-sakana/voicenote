@@ -32,7 +32,6 @@ wheels/
 venv/
 ENV/
 env/
-.python-version
 
 # IDE
 .vscode/

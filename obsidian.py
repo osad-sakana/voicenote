@@ -12,11 +12,7 @@ from rich.console import Console
 console = Console()
 
 
-def save_to_obsidian(
-    vault_path: Path,
-    save_folder: str,
-    transcription: str
-) -> Path:
+def save_to_obsidian(vault_path: Path, save_folder: str, transcription: str) -> Path:
     """
     文字起こし結果をObsidianに保存する
 
@@ -46,9 +42,6 @@ tags:
   - recording
   - raw
 ---
-
-# 録音文字起こし
-
 {transcription}
 """
 

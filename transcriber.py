@@ -45,10 +45,9 @@ def transcribe_audio(audio_path: Path, model_name: str) -> str:
                 beam_size=5
             )
 
-            # セグメントを結合
-            transcription = ""
-            for segment in segments:
-                transcription += segment.text
+            # セグメントを結合（2行改行で区切る）
+            segment_texts = [segment.text.strip() for segment in segments]
+            transcription = "\n\n".join(segment_texts)
 
             progress.update(task, completed=True)
 

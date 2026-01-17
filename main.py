@@ -20,6 +20,13 @@ from transcriber import transcribe_audio
 console = Console()
 
 
+def get_config_dir() -> Path:
+    """設定ディレクトリを取得（なければ作成）"""
+    config_dir = Path.home() / ".config" / "voicenote"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    return config_dir
+
+
 def main():
     """メインエントリーポイント"""
     parser = argparse.ArgumentParser(
@@ -33,7 +40,8 @@ def main():
     args = parser.parse_args()
 
     # 設定ファイルパス
-    config_path = Path(__file__).parent / "config.json"
+    config_dir = get_config_dir()
+    config_path = config_dir / "config.json"
 
     # 設定の読み込みまたは作成
     config = None
@@ -55,7 +63,7 @@ def main():
     audio_data = record_audio()
 
     # 一時ファイルに保存（文字起こし用）
-    temp_wav = Path(__file__).parent / "temp_recording.wav"
+    temp_wav = config_dir / "temp_recording.wav"
     console.print(f"\n[cyan]音声データを一時保存中...[/cyan]")
 
     # float32からint16に変換
