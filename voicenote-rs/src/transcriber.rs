@@ -1,9 +1,12 @@
 use anyhow::{Context, Result};
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
+use rubato::{Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction};
 use std::io::{Read, Write};
 use std::path::Path;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
+
+const WHISPER_SAMPLE_RATE: u32 = 16000;
 
 fn download_model(model_name: &str, model_path: &Path) -> Result<()> {
     let model_file = format!("ggml-{}.bin", model_name);
@@ -78,6 +81,38 @@ fn get_model_path(model_name: &str, config_dir: &Path) -> Result<std::path::Path
     }
 
     Ok(model_path)
+}
+
+fn resample_to_16khz(samples: Vec<f32>, from_rate: u32) -> Result<Vec<f32>> {
+    if from_rate == WHISPER_SAMPLE_RATE {
+        return Ok(samples);
+    }
+
+    println!(
+        "{}",
+        format!("リサンプリング中 ({}Hz -> {}Hz)...", from_rate, WHISPER_SAMPLE_RATE).cyan()
+    );
+
+    let params = SincInterpolationParameters {
+        sinc_len: 256,
+        f_cutoff: 0.95,
+        interpolation: SincInterpolationType::Linear,
+        oversampling_factor: 256,
+        window: WindowFunction::BlackmanHarris2,
+    };
+
+    let mut resampler = SincFixedIn::<f32>::new(
+        WHISPER_SAMPLE_RATE as f64 / from_rate as f64,
+        2.0,
+        params,
+        samples.len(),
+        1,
+    )?;
+
+    let waves_in = vec![samples];
+    let mut waves_out = resampler.process(&waves_in, None)?;
+
+    Ok(waves_out.remove(0))
 }
 
 pub fn transcribe_audio(audio_path: &Path, model_name: &str, config_dir: &Path) -> Result<String> {
@@ -161,9 +196,11 @@ fn load_wav_as_samples(path: &Path) -> Result<Vec<f32>> {
             .collect(),
     };
 
-    if spec.channels == 2 {
-        Ok(samples.chunks(2).map(|chunk| chunk[0]).collect())
+    let mono_samples = if spec.channels == 2 {
+        samples.chunks(2).map(|chunk| chunk[0]).collect()
     } else {
-        Ok(samples)
-    }
+        samples
+    };
+
+    resample_to_16khz(mono_samples, spec.sample_rate)
 }
