@@ -6,6 +6,9 @@ temp_recording.wav
 *.wav
 *.mp3
 
+# Rust
+voicenote-rs/target/
+
 # Python
 __pycache__/
 *.py[cod]
