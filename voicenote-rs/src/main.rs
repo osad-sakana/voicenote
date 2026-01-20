@@ -47,12 +47,12 @@ fn main() -> Result<()> {
 
     let vault_path = PathBuf::from(&config.vault_path);
 
-    let audio_data = record_audio()?;
+    let recording = record_audio()?;
 
     println!("\n{}", "音声データを一時保存中...".cyan());
 
     let temp_wav = config_dir.join("temp_recording.wav");
-    recorder::save_wav(&temp_wav, &audio_data)?;
+    recorder::save_wav(&temp_wav, &recording.data, recording.sample_rate)?;
 
     let transcription = transcribe_audio(&temp_wav, &config.whisper_model, &config_dir)?;
 

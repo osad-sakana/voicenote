@@ -1,14 +1,18 @@
 use anyhow::{Context, Result};
 use colored::Colorize;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use hound::{SampleFormat, WavSpec, WavWriter};
+use cpal::SampleFormat;
+use hound::{WavSpec, WavWriter};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-pub const SAMPLE_RATE: u32 = 16000;
+pub struct RecordingResult {
+    pub data: Vec<f32>,
+    pub sample_rate: u32,
+}
 
-pub fn record_audio() -> Result<Vec<f32>> {
+pub fn record_audio() -> Result<RecordingResult> {
     let recording_data: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
     let is_recording = Arc::new(AtomicBool::new(true));
 
@@ -28,29 +32,85 @@ pub fn record_audio() -> Result<Vec<f32>> {
         .default_input_device()
         .context("入力デバイスが見つかりません")?;
 
+    let supported_config = device
+        .default_input_config()
+        .context("デバイスのデフォルト設定を取得できません")?;
+
+    let actual_sample_rate = supported_config.sample_rate().0;
+    let channels = supported_config.channels();
+
     let config = cpal::StreamConfig {
-        channels: 1,
-        sample_rate: cpal::SampleRate(SAMPLE_RATE),
+        channels,
+        sample_rate: supported_config.sample_rate(),
         buffer_size: cpal::BufferSize::Default,
     };
 
     let recording_data_clone = Arc::clone(&recording_data);
     let is_recording_stream = Arc::clone(&is_recording);
 
-    let stream = device.build_input_stream(
-        &config,
-        move |data: &[f32], _: &cpal::InputCallbackInfo| {
-            if is_recording_stream.load(Ordering::SeqCst) {
-                if let Ok(mut buffer) = recording_data_clone.lock() {
-                    buffer.extend_from_slice(data);
+    let stream = match supported_config.sample_format() {
+        SampleFormat::F32 => device.build_input_stream(
+            &config,
+            move |data: &[f32], _: &cpal::InputCallbackInfo| {
+                if is_recording_stream.load(Ordering::SeqCst) {
+                    if let Ok(mut buffer) = recording_data_clone.lock() {
+                        if channels == 1 {
+                            buffer.extend_from_slice(data);
+                        } else {
+                            for chunk in data.chunks(channels as usize) {
+                                buffer.push(chunk[0]);
+                            }
+                        }
+                    }
                 }
-            }
-        },
-        move |err| {
-            eprintln!("{} {}", "録音エラー:".red(), err);
-        },
-        None,
-    )?;
+            },
+            move |err| {
+                eprintln!("{} {}", "録音エラー:".red(), err);
+            },
+            None,
+        )?,
+        SampleFormat::I16 => {
+            let recording_data_clone = Arc::clone(&recording_data);
+            let is_recording_stream = Arc::clone(&is_recording);
+            device.build_input_stream(
+                &config,
+                move |data: &[i16], _: &cpal::InputCallbackInfo| {
+                    if is_recording_stream.load(Ordering::SeqCst) {
+                        if let Ok(mut buffer) = recording_data_clone.lock() {
+                            for chunk in data.chunks(channels as usize) {
+                                buffer.push(chunk[0] as f32 / 32768.0);
+                            }
+                        }
+                    }
+                },
+                move |err| {
+                    eprintln!("{} {}", "録音エラー:".red(), err);
+                },
+                None,
+            )?
+        }
+        SampleFormat::I32 => {
+            let recording_data_clone = Arc::clone(&recording_data);
+            let is_recording_stream = Arc::clone(&is_recording);
+            device.build_input_stream(
+                &config,
+                move |data: &[i32], _: &cpal::InputCallbackInfo| {
+                    if is_recording_stream.load(Ordering::SeqCst) {
+                        if let Ok(mut buffer) = recording_data_clone.lock() {
+                            for chunk in data.chunks(channels as usize) {
+                                buffer.push(chunk[0] as f32 / 2147483648.0);
+                            }
+                        }
+                    }
+                },
+                move |err| {
+                    eprintln!("{} {}", "録音エラー:".red(), err);
+                },
+                None,
+            )?
+        }
+        format => anyhow::bail!("サポートされていないサンプルフォーマット: {:?}", format),
+    };
 
     stream.play()?;
 
@@ -71,21 +131,24 @@ pub fn record_audio() -> Result<Vec<f32>> {
         anyhow::bail!("録音データがありません。");
     }
 
-    Ok(data)
+    Ok(RecordingResult {
+        data,
+        sample_rate: actual_sample_rate,
+    })
 }
 
-pub fn save_wav(path: &Path, data: &[f32]) -> Result<()> {
+pub fn save_wav(path: &Path, data: &[f32], sample_rate: u32) -> Result<()> {
     let spec = WavSpec {
         channels: 1,
-        sample_rate: SAMPLE_RATE,
+        sample_rate,
         bits_per_sample: 16,
-        sample_format: SampleFormat::Int,
+        sample_format: hound::SampleFormat::Int,
     };
 
     let mut writer = WavWriter::create(path, spec)?;
 
     for &sample in data {
-        let sample_i16 = (sample * 32767.0) as i16;
+        let sample_i16 = (sample * 32767.0).clamp(-32768.0, 32767.0) as i16;
         writer.write_sample(sample_i16)?;
     }
 
