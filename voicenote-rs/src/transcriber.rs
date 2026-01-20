@@ -1,8 +1,70 @@
 use anyhow::{Context, Result};
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
+use std::io::{Read, Write};
 use std::path::Path;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
+
+fn download_model(model_name: &str, model_path: &Path) -> Result<()> {
+    let model_file = format!("ggml-{}.bin", model_name);
+    let url = format!(
+        "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/{}",
+        model_file
+    );
+
+    println!(
+        "{}",
+        format!("モデル '{}' をダウンロード中...", model_name).cyan()
+    );
+    println!("{}", format!("URL: {}", url).cyan());
+
+    let response = ureq::get(&url).call().context("ダウンロードに失敗しました")?;
+
+    let total_size: u64 = response
+        .header("Content-Length")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+
+    let pb = if total_size > 0 {
+        let pb = ProgressBar::new(total_size);
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template("{spinner:.green} [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})")
+                .unwrap()
+                .progress_chars("#>-"),
+        );
+        pb
+    } else {
+        let pb = ProgressBar::new_spinner();
+        pb.set_style(
+            ProgressStyle::default_spinner()
+                .template("{spinner:.green} {bytes} ダウンロード中...")
+                .unwrap(),
+        );
+        pb.enable_steady_tick(std::time::Duration::from_millis(100));
+        pb
+    };
+
+    let mut reader = response.into_reader();
+    let mut file = std::fs::File::create(model_path)?;
+    let mut buffer = [0u8; 8192];
+    let mut downloaded: u64 = 0;
+
+    loop {
+        let bytes_read = reader.read(&mut buffer)?;
+        if bytes_read == 0 {
+            break;
+        }
+        file.write_all(&buffer[..bytes_read])?;
+        downloaded += bytes_read as u64;
+        pb.set_position(downloaded);
+    }
+
+    pb.finish_with_message("ダウンロード完了");
+    println!("{}", "モデルのダウンロードが完了しました".green());
+
+    Ok(())
+}
 
 fn get_model_path(model_name: &str, config_dir: &Path) -> Result<std::path::PathBuf> {
     let models_dir = config_dir.join("models");
@@ -12,26 +74,7 @@ fn get_model_path(model_name: &str, config_dir: &Path) -> Result<std::path::Path
     let model_path = models_dir.join(&model_file);
 
     if !model_path.exists() {
-        println!(
-            "{}",
-            format!("モデル '{}' をダウンロードしてください:", model_name).yellow()
-        );
-        println!(
-            "{}",
-            format!(
-                "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/{}",
-                model_file
-            )
-            .cyan()
-        );
-        println!(
-            "{}",
-            format!("保存先: {}", model_path.display()).cyan()
-        );
-        anyhow::bail!(
-            "モデルファイルが見つかりません: {}",
-            model_path.display()
-        );
+        download_model(model_name, &model_path)?;
     }
 
     Ok(model_path)
