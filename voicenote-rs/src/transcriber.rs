@@ -140,12 +140,15 @@ pub fn transcribe_audio(audio_path: &Path, model_name: &str, config_dir: &Path) 
 
     pb.finish_with_message("モデルをロードしました");
 
-    let pb = ProgressBar::new_spinner();
-    pb.set_style(spinner_style);
-    pb.set_message("文字起こし中...");
-    pb.enable_steady_tick(std::time::Duration::from_millis(100));
+    println!("\n{}", "文字起こし中...".cyan());
 
     let audio_data = load_wav_as_samples(audio_path)?;
+
+    let duration_secs = audio_data.len() as f32 / WHISPER_SAMPLE_RATE as f32;
+    println!(
+        "{}",
+        format!("音声長: {:.1}秒 ({} サンプル)", duration_secs, audio_data.len()).cyan()
+    );
 
     let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
     params.set_language(Some("ja"));
@@ -153,6 +156,9 @@ pub fn transcribe_audio(audio_path: &Path, model_name: &str, config_dir: &Path) 
     params.set_print_progress(false);
     params.set_print_realtime(false);
     params.set_print_timestamps(false);
+    params.set_translate(false);
+    params.set_no_speech_thold(0.6);
+    params.set_suppress_non_speech_tokens(true);
 
     let mut state = ctx.create_state().context("ステートの作成に失敗しました")?;
     state
@@ -160,18 +166,35 @@ pub fn transcribe_audio(audio_path: &Path, model_name: &str, config_dir: &Path) 
         .context("文字起こしに失敗しました")?;
 
     let num_segments = state.full_n_segments().context("セグメント数の取得に失敗")?;
+    println!(
+        "{}",
+        format!("セグメント数: {}", num_segments).cyan()
+    );
+
     let mut segments: Vec<String> = Vec::new();
 
+    println!("\n{}", "--- 文字起こし結果 ---".yellow());
     for i in 0..num_segments {
         if let Ok(text) = state.full_get_segment_text(i) {
             let trimmed = text.trim();
+            let start = state.full_get_segment_t0(i).unwrap_or(0) as f32 / 100.0;
+            let end = state.full_get_segment_t1(i).unwrap_or(0) as f32 / 100.0;
+
+            println!(
+                "{} [{:.1}s - {:.1}s] {}",
+                format!("[{}]", i + 1).cyan(),
+                start,
+                end,
+                trimmed
+            );
+
             if !trimmed.is_empty() {
                 segments.push(trimmed.to_string());
             }
         }
     }
+    println!("{}", "----------------------".yellow());
 
-    pb.finish_with_message("文字起こし完了");
     println!("{}", "文字起こし完了".green());
 
     Ok(segments.join("\n\n"))
@@ -180,6 +203,15 @@ pub fn transcribe_audio(audio_path: &Path, model_name: &str, config_dir: &Path) 
 fn load_wav_as_samples(path: &Path) -> Result<Vec<f32>> {
     let mut reader = hound::WavReader::open(path)?;
     let spec = reader.spec();
+
+    println!(
+        "{}",
+        format!(
+            "WAV情報: {}Hz, {}ch, {}bit",
+            spec.sample_rate, spec.channels, spec.bits_per_sample
+        )
+        .cyan()
+    );
 
     let samples: Vec<f32> = match spec.sample_format {
         hound::SampleFormat::Int => {
