@@ -150,7 +150,7 @@ pub fn transcribe_audio(audio_path: &Path, model_name: &str, config_dir: &Path) 
         format!("音声長: {:.1}秒 ({} サンプル)", duration_secs, audio_data.len()).cyan()
     );
 
-    let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+    let mut params = FullParams::new(SamplingStrategy::BeamSearch { beam_size: 5, patience: 1.0 });
     params.set_language(Some("ja"));
     params.set_print_special(false);
     params.set_print_progress(false);
@@ -159,6 +159,11 @@ pub fn transcribe_audio(audio_path: &Path, model_name: &str, config_dir: &Path) 
     params.set_translate(false);
     params.set_no_speech_thold(0.6);
     params.set_suppress_non_speech_tokens(true);
+    params.set_temperature(0.0);
+    params.set_temperature_inc(0.2);
+    params.set_entropy_thold(2.4);
+    params.set_logprob_thold(-1.0);
+    params.set_no_context(true);
 
     let mut state = ctx.create_state().context("ステートの作成に失敗しました")?;
     state
@@ -172,6 +177,8 @@ pub fn transcribe_audio(audio_path: &Path, model_name: &str, config_dir: &Path) 
     );
 
     let mut segments: Vec<String> = Vec::new();
+    let mut last_text: Option<String> = None;
+    let mut repeat_count = 0;
 
     println!("\n{}", "--- 文字起こし結果 ---".yellow());
     for i in 0..num_segments {
@@ -179,6 +186,26 @@ pub fn transcribe_audio(audio_path: &Path, model_name: &str, config_dir: &Path) 
             let trimmed = text.trim();
             let start = state.full_get_segment_t0(i).unwrap_or(0) as f32 / 100.0;
             let end = state.full_get_segment_t1(i).unwrap_or(0) as f32 / 100.0;
+
+            if let Some(ref last) = last_text {
+                if last == trimmed {
+                    repeat_count += 1;
+                    if repeat_count >= 2 {
+                        println!(
+                            "{} [{:.1}s - {:.1}s] {} {}",
+                            format!("[{}]", i + 1).cyan(),
+                            start,
+                            end,
+                            trimmed,
+                            "(スキップ: 繰り返し検出)".yellow()
+                        );
+                        continue;
+                    }
+                } else {
+                    repeat_count = 0;
+                }
+            }
+            last_text = Some(trimmed.to_string());
 
             println!(
                 "{} [{:.1}s - {:.1}s] {}",
