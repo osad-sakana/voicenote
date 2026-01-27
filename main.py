@@ -5,6 +5,7 @@
 """
 
 import argparse
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -37,6 +38,11 @@ def main():
         action="store_true",
         help="設定を再入力する"
     )
+    parser.add_argument(
+        "--file",
+        type=str,
+        help="既存の音声ファイルを文字起こしする（録音をスキップ）"
+    )
     args = parser.parse_args()
 
     # 設定ファイルパス
@@ -59,22 +65,42 @@ def main():
     save_folder = config["save_folder"]
     whisper_model = config["whisper_model"]
 
-    # 録音
-    audio_data = record_audio()
+    # ファイルモード: 既存ファイルを文字起こし
+    if args.file:
+        audio_file = Path(args.file)
 
-    # 一時ファイルに保存（文字起こし用）
-    temp_wav = config_dir / "temp_recording.wav"
-    console.print(f"\n[cyan]音声データを一時保存中...[/cyan]")
+        # ファイルの存在確認
+        if not audio_file.exists():
+            console.print(f"[red]エラー: ファイルが見つかりません: {audio_file}[/red]")
+            sys.exit(1)
 
-    # float32からint16に変換
-    audio_int16 = (audio_data * 32767).astype(np.int16)
-    wavfile.write(temp_wav, SAMPLE_RATE, audio_int16)
+        if not audio_file.is_file():
+            console.print(f"[red]エラー: 指定されたパスはファイルではありません: {audio_file}[/red]")
+            sys.exit(1)
 
-    # 文字起こし
-    transcription = transcribe_audio(temp_wav, whisper_model)
+        console.print(f"[cyan]音声ファイル: {audio_file.name}[/cyan]")
 
-    # 一時ファイル削除
-    temp_wav.unlink()
+        # 文字起こし（faster-whisperは様々な音声形式をサポート）
+        transcription = transcribe_audio(audio_file, whisper_model)
+
+    # 録音モード: 新規録音して文字起こし
+    else:
+        # 録音
+        audio_data = record_audio()
+
+        # 一時ファイルに保存（文字起こし用）
+        temp_wav = config_dir / "temp_recording.wav"
+        console.print(f"\n[cyan]音声データを一時保存中...[/cyan]")
+
+        # float32からint16に変換
+        audio_int16 = (audio_data * 32767).astype(np.int16)
+        wavfile.write(temp_wav, SAMPLE_RATE, audio_int16)
+
+        # 文字起こし
+        transcription = transcribe_audio(temp_wav, whisper_model)
+
+        # 一時ファイル削除
+        temp_wav.unlink()
 
     # Obsidianに保存
     console.print(f"\n[cyan]Obsidianに保存中...[/cyan]")

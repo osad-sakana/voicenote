@@ -17,6 +17,10 @@ uv run main.py --config
 
 # Normal run (starts recording immediately)
 uv run main.py
+
+# Transcribe existing audio file (skips recording)
+uv run main.py --file path/to/audio.wav
+uv run main.py --file path/to/audio.mp3
 ```
 
 Dependencies are managed in `pyproject.toml`. Use `uv sync` to install dependencies, or `uv run` which automatically syncs before running.
@@ -33,11 +37,18 @@ Dependencies are managed in `pyproject.toml`. Use `uv sync` to install dependenc
 
 ### Data Flow
 
+**Recording Mode (default)**:
 1. **Configuration Phase**: `main.py` → `config.py` (load/interactive setup) → `config.json`
 2. **Recording Phase**: `main.py` → `recorder.py` (sounddevice stream with callback) → numpy array
 3. **Conversion Phase**: `main.py` converts float32 → int16 → WAV file (`temp_recording.wav`)
 4. **Transcription Phase**: `main.py` → `transcriber.py` (faster-whisper) → text string
 5. **Save Phase**: `main.py` → `obsidian.py` → `{vault_path}/{save_folder}/YYYY-MM-DD_HHMMSS_raw.md`
+
+**File Mode (`--file` argument)**:
+1. **Configuration Phase**: `main.py` → `config.py` (load/interactive setup) → `config.json`
+2. **Validation Phase**: `main.py` checks file existence and validates it's a file
+3. **Transcription Phase**: `main.py` → `transcriber.py` (faster-whisper) → text string (supports WAV, MP3, M4A, etc.)
+4. **Save Phase**: `main.py` → `obsidian.py` → `{vault_path}/{save_folder}/YYYY-MM-DD_HHMMSS_raw.md`
 
 ### Important Implementation Details
 
