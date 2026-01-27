@@ -6,6 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 voicenote is a local voice recording and transcription tool that:
 - Records audio using sounddevice
+- Saves audio files to Desktop as WAV format
 - Transcribes using faster-whisper (completely local, no external APIs)
 - Saves transcriptions to Obsidian vault with frontmatter
 
@@ -17,6 +18,9 @@ uv run main.py --config
 
 # Normal run (starts recording immediately)
 uv run main.py
+
+# Record only mode (saves to Desktop without transcription)
+uv run main.py --record-only
 
 # Transcribe existing audio file (skips recording)
 uv run main.py --file path/to/audio.wav
@@ -40,9 +44,14 @@ Dependencies are managed in `pyproject.toml`. Use `uv sync` to install dependenc
 **Recording Mode (default)**:
 1. **Configuration Phase**: `main.py` → `config.py` (load/interactive setup) → `config.json`
 2. **Recording Phase**: `main.py` → `recorder.py` (sounddevice stream with callback) → numpy array
-3. **Conversion Phase**: `main.py` converts float32 → int16 → WAV file (`temp_recording.wav`)
+3. **Save Phase**: `main.py` converts float32 → int16 → WAV file saved to `~/Desktop/YYYY-MM-DD_HHMMSS_recording.wav`
 4. **Transcription Phase**: `main.py` → `transcriber.py` (faster-whisper) → text string
-5. **Save Phase**: `main.py` → `obsidian.py` → `{vault_path}/{save_folder}/YYYY-MM-DD_HHMMSS_raw.md`
+5. **Obsidian Save Phase**: `main.py` → `obsidian.py` → `{vault_path}/{save_folder}/YYYY-MM-DD_HHMMSS_raw.md`
+
+**Record-Only Mode (`--record-only` argument)**:
+1. **Configuration Phase**: `main.py` → `config.py` (load/interactive setup) → `config.json`
+2. **Recording Phase**: `main.py` → `recorder.py` (sounddevice stream with callback) → numpy array
+3. **Save Phase**: `main.py` converts float32 → int16 → WAV file saved to `~/Desktop/YYYY-MM-DD_HHMMSS_recording.wav` (transcription skipped)
 
 **File Mode (`--file` argument)**:
 1. **Configuration Phase**: `main.py` → `config.py` (load/interactive setup) → `config.json`
@@ -54,9 +63,9 @@ Dependencies are managed in `pyproject.toml`. Use `uv sync` to install dependenc
 
 - **Audio Format**: Recording is float32 mono at 16kHz (SAMPLE_RATE constant in recorder.py)
 - **Signal Handling**: recorder.py uses global state (_is_recording, _recording_data) with SIGINT handler for graceful Ctrl+C shutdown
-- **Temporary Files**: WAV file is created temporarily for Whisper input, then deleted after transcription
+- **Audio File Storage**: Recorded WAV files are always saved to Desktop with format `YYYY-MM-DD_HHMMSS_recording.wav`
 - **Whisper Configuration**: Always uses CPU device with int8 compute_type, Japanese language, beam_size=5
-- **Output Format**: Files named `YYYY-MM-DD_HHMMSS_raw.md` with YAML frontmatter containing created timestamp, type=transcription, tags=[recording, raw]
+- **Transcription Output**: Markdown files named `YYYY-MM-DD_HHMMSS_raw.md` with YAML frontmatter containing created timestamp, type=transcription, tags=[recording, raw]
 
 ## Code Modification Guidelines
 

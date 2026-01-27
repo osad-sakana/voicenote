@@ -43,7 +43,17 @@ def main():
         type=str,
         help="既存の音声ファイルを文字起こしする（録音をスキップ）"
     )
+    parser.add_argument(
+        "--record-only",
+        action="store_true",
+        help="録音のみ実行（文字起こしをスキップしてDesktopに保存）"
+    )
     args = parser.parse_args()
+
+    # オプションの排他チェック
+    if args.file and args.record_only:
+        console.print("[red]エラー: --fileと--record-onlyは同時に指定できません[/red]")
+        sys.exit(1)
 
     # 設定ファイルパス
     config_dir = get_config_dir()
@@ -65,6 +75,32 @@ def main():
     save_folder = config["save_folder"]
     whisper_model = config["whisper_model"]
 
+    # 録音のみモード: Desktopに保存して終了
+    if args.record_only:
+        from datetime import datetime
+
+        # 録音
+        audio_data = record_audio()
+
+        # Desktopに保存
+        desktop_path = Path.home() / "Desktop"
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+        audio_file = desktop_path / f"{timestamp}_recording.wav"
+
+        console.print(f"\n[cyan]Desktopに保存中...[/cyan]")
+
+        # float32からint16に変換
+        audio_int16 = (audio_data * 32767).astype(np.int16)
+        wavfile.write(audio_file, SAMPLE_RATE, audio_int16)
+
+        # 完了メッセージ
+        console.print(Panel.fit(
+            f"[bold green]録音完了![/bold green]\n\n"
+            f"[bold]保存先:[/bold]\n{audio_file.absolute()}",
+            border_style="green"
+        ))
+        return
+
     # ファイルモード: 既存ファイルを文字起こし
     if args.file:
         audio_file = Path(args.file)
@@ -85,22 +121,26 @@ def main():
 
     # 録音モード: 新規録音して文字起こし
     else:
+        from datetime import datetime
+
         # 録音
         audio_data = record_audio()
 
-        # 一時ファイルに保存（文字起こし用）
-        temp_wav = config_dir / "temp_recording.wav"
-        console.print(f"\n[cyan]音声データを一時保存中...[/cyan]")
+        # Desktopに保存
+        desktop_path = Path.home() / "Desktop"
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+        audio_file = desktop_path / f"{timestamp}_recording.wav"
+
+        console.print(f"\n[cyan]Desktopに音声データを保存中...[/cyan]")
 
         # float32からint16に変換
         audio_int16 = (audio_data * 32767).astype(np.int16)
-        wavfile.write(temp_wav, SAMPLE_RATE, audio_int16)
+        wavfile.write(audio_file, SAMPLE_RATE, audio_int16)
+
+        console.print(f"[green]✓ 保存完了: {audio_file.name}[/green]")
 
         # 文字起こし
-        transcription = transcribe_audio(temp_wav, whisper_model)
-
-        # 一時ファイル削除
-        temp_wav.unlink()
+        transcription = transcribe_audio(audio_file, whisper_model)
 
     # Obsidianに保存
     console.print(f"\n[cyan]Obsidianに保存中...[/cyan]")
@@ -109,7 +149,8 @@ def main():
     # 完了メッセージ
     console.print(Panel.fit(
         f"[bold green]完了![/bold green]\n\n"
-        f"[bold]保存先:[/bold]\n{saved_path.absolute()}",
+        f"[bold]音声ファイル:[/bold]\n{audio_file.absolute()}\n\n"
+        f"[bold]文字起こし結果:[/bold]\n{saved_path.absolute()}",
         border_style="green"
     ))
 
