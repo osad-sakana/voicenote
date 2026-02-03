@@ -45,9 +45,21 @@ def transcribe_audio(audio_path: Path, model_name: str) -> str:
                 beam_size=5
             )
 
-            # セグメントを結合（2行改行で区切る）
-            segment_texts = [segment.text.strip() for segment in segments]
-            transcription = "\n\n".join(segment_texts)
+            # セグメントを結合（2秒以上の間隔で改行）
+            PAUSE_THRESHOLD = 2.0
+            result_parts = []
+            prev_end = 0.0
+
+            for segment in segments:
+                gap = segment.start - prev_end
+                if result_parts and gap >= PAUSE_THRESHOLD:
+                    result_parts.append("\n\n")
+                elif result_parts:
+                    result_parts.append(" ")
+                result_parts.append(segment.text.strip())
+                prev_end = segment.end
+
+            transcription = "".join(result_parts)
 
             progress.update(task, completed=True)
 
@@ -96,11 +108,27 @@ def transcribe_audio_openai(audio_path: Path) -> str:
             client = OpenAI(api_key=api_key)
 
             with open(audio_path, "rb") as audio_file:
-                transcription = client.audio.transcriptions.create(
+                response = client.audio.transcriptions.create(
                     model="whisper-1",
                     file=audio_file,
-                    response_format="text"
+                    response_format="verbose_json"
                 )
+
+            # セグメントを結合（2秒以上の間隔で改行）
+            PAUSE_THRESHOLD = 2.0
+            result_parts = []
+            prev_end = 0.0
+
+            for segment in response.segments:
+                gap = segment.start - prev_end
+                if result_parts and gap >= PAUSE_THRESHOLD:
+                    result_parts.append("\n\n")
+                elif result_parts:
+                    result_parts.append(" ")
+                result_parts.append(segment.text.strip())
+                prev_end = segment.end
+
+            transcription = "".join(result_parts)
 
             progress.update(task, completed=True)
 
