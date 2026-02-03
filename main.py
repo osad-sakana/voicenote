@@ -5,8 +5,14 @@
 """
 
 import argparse
+import os
 import sys
 from pathlib import Path
+
+from dotenv import load_dotenv
+
+# .envファイルを読み込み（存在する場合）
+load_dotenv()
 
 import numpy as np
 from rich.console import Console
@@ -15,8 +21,8 @@ from scipy.io import wavfile
 
 from config import configure_interactive, load_config, save_config
 from obsidian import save_to_obsidian
-from recorder import SAMPLE_RATE, record_audio
-from transcriber import transcribe_audio
+from recorder import SAMPLE_RATE, list_devices, record_audio
+from transcriber import transcribe_audio, transcribe_audio_openai
 
 console = Console()
 
@@ -26,6 +32,15 @@ def get_config_dir() -> Path:
     config_dir = Path.home() / ".config" / "voicenote"
     config_dir.mkdir(parents=True, exist_ok=True)
     return config_dir
+
+
+def do_transcription(audio_path: Path, config: dict) -> str:
+    """設定に基づいて適切な文字起こしを実行"""
+    mode = config.get("transcription_mode", "local")
+
+    if mode == "openai":
+        return transcribe_audio_openai(audio_path)
+    return transcribe_audio(audio_path, config["whisper_model"])
 
 
 def main():
@@ -48,7 +63,22 @@ def main():
         action="store_true",
         help="録音のみ実行（文字起こしをスキップしてDesktopに保存）"
     )
+    parser.add_argument(
+        "--list-devices",
+        action="store_true",
+        help="利用可能なオーディオデバイス一覧を表示"
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        help="録音に使用するデバイス（名前またはID）"
+    )
     args = parser.parse_args()
+
+    # デバイス一覧表示モード
+    if args.list_devices:
+        list_devices()
+        return
 
     # オプションの排他チェック
     if args.file and args.record_only:
@@ -68,7 +98,14 @@ def main():
         config = configure_interactive()
         save_config(config_path, config)
     else:
+        # 旧設定の互換性: transcription_modeがない場合はlocalを設定
+        if "transcription_mode" not in config:
+            config["transcription_mode"] = "local"
         console.print("[cyan]設定を読み込みました。[/cyan]")
+
+    # 設定からAPIキーを環境変数にセット（.envより優先度低）
+    if not os.environ.get("OPENAI_API_KEY") and config.get("openai_api_key"):
+        os.environ["OPENAI_API_KEY"] = config["openai_api_key"]
 
     # 設定の取得
     vault_path = Path(config["vault_path"])
@@ -80,7 +117,7 @@ def main():
         from datetime import datetime
 
         # 録音
-        audio_data = record_audio()
+        audio_data = record_audio(device=args.device)
 
         # Desktopに保存
         desktop_path = Path.home() / "Desktop"
@@ -116,15 +153,15 @@ def main():
 
         console.print(f"[cyan]音声ファイル: {audio_file.name}[/cyan]")
 
-        # 文字起こし（faster-whisperは様々な音声形式をサポート）
-        transcription = transcribe_audio(audio_file, whisper_model)
+        # 文字起こし
+        transcription = do_transcription(audio_file, config)
 
     # 録音モード: 新規録音して文字起こし
     else:
         from datetime import datetime
 
         # 録音
-        audio_data = record_audio()
+        audio_data = record_audio(device=args.device)
 
         # Desktopに保存
         desktop_path = Path.home() / "Desktop"
@@ -140,7 +177,7 @@ def main():
         console.print(f"[green]✓ 保存完了: {audio_file.name}[/green]")
 
         # 文字起こし
-        transcription = transcribe_audio(audio_file, whisper_model)
+        transcription = do_transcription(audio_file, config)
 
     # Obsidianに保存
     console.print(f"\n[cyan]Obsidianに保存中...[/cyan]")

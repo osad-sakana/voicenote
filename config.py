@@ -4,6 +4,7 @@
 """
 
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Optional
@@ -87,10 +88,57 @@ def configure_interactive() -> dict:
         else:
             console.print("[red]✗ 1-5の数字を入力してください。[/red]")
 
+    # 文字起こしモード選択
+    console.print("\n[bold]文字起こしモードを選択してください:[/bold]")
+    console.print("  1. local  (ローカル実行 - faster-whisper)")
+    console.print("  2. openai (OpenAI API - 高速・高精度)")
+
+    while True:
+        mode_choice = Prompt.ask("[bold]選択[/bold]", default="1")
+        if mode_choice == "1":
+            transcription_mode = "local"
+            console.print("[green]✓ ローカルモード(faster-whisper)を選択しました[/green]")
+            break
+        elif mode_choice == "2":
+            transcription_mode = "openai"
+            console.print("[green]✓ OpenAI APIモードを選択しました[/green]")
+            break
+        else:
+            console.print("[red]✗ 1または2を入力してください。[/red]")
+
+    # OpenAI APIキー設定（openaiモード選択時）
+    openai_api_key = None
+    if transcription_mode == "openai":
+        # 環境変数にあるか確認
+        env_key = os.environ.get("OPENAI_API_KEY")
+        if env_key:
+            console.print("[dim]OPENAI_API_KEYが環境変数で設定されています。[/dim]")
+            use_env = Prompt.ask(
+                "[bold]環境変数のキーを使用しますか？[/bold]",
+                choices=["y", "n"],
+                default="y"
+            )
+            if use_env == "y":
+                openai_api_key = None  # 環境変数を使用（設定に保存しない）
+            else:
+                openai_api_key = Prompt.ask("[bold]OpenAI APIキー[/bold]")
+        else:
+            openai_api_key = Prompt.ask(
+                "[bold]OpenAI APIキー[/bold]",
+                password=True
+            )
+            if openai_api_key:
+                console.print("[green]✓ APIキーを設定しました[/green]")
+
     config = {
         "vault_path": str(vault_path),
         "save_folder": save_folder,
-        "whisper_model": whisper_model
+        "whisper_model": whisper_model,
+        "transcription_mode": transcription_mode,
     }
+
+    # APIキーを設定に保存（環境変数を使わない場合のみ）
+    if openai_api_key:
+        config["openai_api_key"] = openai_api_key
 
     return config
