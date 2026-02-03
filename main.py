@@ -20,7 +20,7 @@ from scipy.io import wavfile
 
 from config import configure_interactive, load_config, save_config
 from obsidian import save_to_obsidian
-from recorder import SAMPLE_RATE, record_audio
+from recorder import SAMPLE_RATE, list_devices, record_audio
 from transcriber import transcribe_audio, transcribe_audio_openai
 
 console = Console()
@@ -62,7 +62,22 @@ def main():
         action="store_true",
         help="録音のみ実行（文字起こしをスキップしてDesktopに保存）"
     )
+    parser.add_argument(
+        "--list-devices",
+        action="store_true",
+        help="利用可能なオーディオデバイス一覧を表示"
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        help="録音に使用するデバイス（名前またはID）"
+    )
     args = parser.parse_args()
+
+    # デバイス一覧表示モード
+    if args.list_devices:
+        list_devices()
+        return
 
     # オプションの排他チェック
     if args.file and args.record_only:
@@ -97,7 +112,7 @@ def main():
         from datetime import datetime
 
         # 録音
-        audio_data = record_audio()
+        audio_data = record_audio(device=args.device)
 
         # Desktopに保存
         desktop_path = Path.home() / "Desktop"
@@ -141,7 +156,7 @@ def main():
         from datetime import datetime
 
         # 録音
-        audio_data = record_audio()
+        audio_data = record_audio(device=args.device)
 
         # Desktopに保存
         desktop_path = Path.home() / "Desktop"

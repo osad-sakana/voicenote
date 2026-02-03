@@ -29,6 +29,13 @@ uv run main.py --record-only
 # Transcribe existing audio file (skips recording)
 uv run main.py --file path/to/audio.wav
 uv run main.py --file path/to/audio.mp3
+
+# List available audio devices
+uv run main.py --list-devices
+
+# Record from specific device (name or ID)
+uv run main.py --device "BlackHole 2ch"
+uv run main.py --device 2
 ```
 
 Dependencies are managed in `pyproject.toml`. Use `uv sync` to install dependencies, or `uv run` which automatically syncs before running.
