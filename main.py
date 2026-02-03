@@ -5,6 +5,7 @@
 """
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -101,6 +102,10 @@ def main():
         if "transcription_mode" not in config:
             config["transcription_mode"] = "local"
         console.print("[cyan]設定を読み込みました。[/cyan]")
+
+    # 設定からAPIキーを環境変数にセット（.envより優先度低）
+    if not os.environ.get("OPENAI_API_KEY") and config.get("openai_api_key"):
+        os.environ["OPENAI_API_KEY"] = config["openai_api_key"]
 
     # 設定の取得
     vault_path = Path(config["vault_path"])
