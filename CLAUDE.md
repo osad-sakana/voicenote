@@ -4,11 +4,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-voicenote is a local voice recording and transcription tool that:
+voicenote is a voice recording and transcription tool that:
 - Records audio using sounddevice
 - Saves audio files to Desktop as WAV format
-- Transcribes using faster-whisper (completely local, no external APIs)
+- Transcribes using faster-whisper (local) or OpenAI Whisper API (cloud)
 - Saves transcriptions to Obsidian vault with frontmatter
+
+## Environment Variables
+
+- `OPENAI_API_KEY`: OpenAI API key for cloud transcription (optional). When set, enables OpenAI mode selection during `--config`.
 
 ## Running the Application
 
@@ -64,7 +68,8 @@ Dependencies are managed in `pyproject.toml`. Use `uv sync` to install dependenc
 - **Audio Format**: Recording is float32 mono at 16kHz (SAMPLE_RATE constant in recorder.py)
 - **Signal Handling**: recorder.py uses global state (_is_recording, _recording_data) with SIGINT handler for graceful Ctrl+C shutdown
 - **Audio File Storage**: Recorded WAV files are always saved to Desktop with format `YYYY-MM-DD_HHMMSS_recording.wav`
-- **Whisper Configuration**: Always uses CPU device with int8 compute_type, Japanese language, beam_size=5
+- **Transcription Modes**: `local` (faster-whisper, CPU, int8) or `openai` (Whisper API). Mode selected via `--config` when `OPENAI_API_KEY` is set.
+- **Whisper Configuration**: Local mode uses CPU device with int8 compute_type, auto language detection, beam_size=5. OpenAI mode uses whisper-1 model with 25MB file size limit.
 - **Transcription Output**: Markdown files named `YYYY-MM-DD_HHMMSS_raw.md` with YAML frontmatter containing created timestamp, type=transcription, tags=[recording, raw]
 
 ## Code Modification Guidelines
@@ -78,9 +83,10 @@ Dependencies are managed in `pyproject.toml`. Use `uv sync` to install dependenc
 
 ### When modifying transcription:
 
-- The `language="ja"` parameter in transcriber.py assumes Japanese audio
+- Language detection is automatic (no hardcoded language parameter)
 - Changing model affects accuracy/speed tradeoff (tiny → large-v3)
-- Audio must be written to disk as WAV before transcription (faster-whisper limitation)
+- Audio must be written to disk before transcription
+- OpenAI mode has 25MB file size limit; local mode has no limit
 
 ### When changing output format:
 

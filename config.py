@@ -4,6 +4,7 @@
 """
 
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Optional
@@ -87,10 +88,34 @@ def configure_interactive() -> dict:
         else:
             console.print("[red]✗ 1-5の数字を入力してください。[/red]")
 
+    # 文字起こしモード選択
+    openai_key = os.environ.get("OPENAI_API_KEY")
+    if openai_key:
+        console.print("\n[bold]文字起こしモードを選択してください:[/bold]")
+        console.print("  1. local  (ローカル実行 - faster-whisper)")
+        console.print("  2. openai (OpenAI API - 高速・高精度)")
+
+        while True:
+            mode_choice = Prompt.ask("[bold]選択[/bold]", default="1")
+            if mode_choice == "1":
+                transcription_mode = "local"
+                console.print("[green]✓ ローカルモード(faster-whisper)を選択しました[/green]")
+                break
+            elif mode_choice == "2":
+                transcription_mode = "openai"
+                console.print("[green]✓ OpenAI APIモードを選択しました[/green]")
+                break
+            else:
+                console.print("[red]✗ 1または2を入力してください。[/red]")
+    else:
+        console.print("\n[dim]OPENAI_API_KEY環境変数が設定されていないため、ローカルモードを使用します。[/dim]")
+        transcription_mode = "local"
+
     config = {
         "vault_path": str(vault_path),
         "save_folder": save_folder,
-        "whisper_model": whisper_model
+        "whisper_model": whisper_model,
+        "transcription_mode": transcription_mode,
     }
 
     return config
