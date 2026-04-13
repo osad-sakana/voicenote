@@ -17,76 +17,60 @@ console = Console()
 
 
 def load_config(config_path: Path) -> Optional[dict]:
-    """設定ファイルを読み込む"""
-    if config_path.exists():
-        try:
-            with open(config_path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception as e:
-            console.print(f"[red]設定ファイルの読み込みエラー: {e}[/red]")
-            return None
-    return None
+    """設定ファイルを読み込む。存在しない場合はNoneを返す。"""
+    if not config_path.exists():
+        return None
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = json.load(f)
+        return _migrate(config)
+    except Exception as e:
+        console.print(f"[red]設定ファイルの読み込みエラー: {e}[/red]")
+        return None
 
 
 def save_config(config_path: Path, config: dict):
-    """設定ファイルを保存する"""
+    """設定ファイルを保存する。失敗した場合はRuntimeErrorを送出。"""
     try:
+        config_path.parent.mkdir(parents=True, exist_ok=True)
         with open(config_path, "w", encoding="utf-8") as f:
             json.dump(config, f, ensure_ascii=False, indent=2)
-        console.print(f"[green]設定を保存しました: {config_path}[/green]")
     except Exception as e:
-        console.print(f"[red]設定ファイルの保存エラー: {e}[/red]")
-        sys.exit(1)
+        raise RuntimeError(f"設定ファイルの保存エラー: {e}") from e
+
+
+def _migrate(config: dict) -> dict:
+    """旧フォーマット（vault_path + save_folder）を新フォーマットに変換する。"""
+    if "vault_path" in config and "save_folder" in config:
+        old_save_folder = config["save_folder"]
+        # 既に絶対パスなら変換不要
+        if not Path(old_save_folder).is_absolute():
+            config = {
+                **config,
+                "save_folder": str(Path(config["vault_path"]) / old_save_folder),
+            }
+        del config["vault_path"]
+    if "transcription_mode" not in config:
+        config = {**config, "transcription_mode": "local"}
+    return config
 
 
 def configure_interactive() -> dict:
-    """対話的に設定を入力する"""
+    """対話的に設定を入力する（CLI用）"""
     console.print(Panel.fit(
         "[bold cyan]初回設定[/bold cyan]\n設定項目を入力してください。",
-        border_style="cyan"
+        border_style="cyan",
     ))
 
-    # Obsidian Vaultのパス
+    # 保存先フォルダ（絶対パス）
     while True:
-        vault_path = Prompt.ask("[bold]Obsidian Vaultの絶対パス[/bold]")
-        vault_path = Path(vault_path).expanduser().resolve()
-
-        if vault_path.exists() and vault_path.is_dir():
-            console.print(f"[green]✓ Vaultパスを確認しました: {vault_path}[/green]")
+        save_folder = Prompt.ask("[bold]保存先フォルダの絶対パス[/bold]（例: /Users/xxx/Obsidian/recordings）")
+        save_folder_path = Path(save_folder).expanduser().resolve()
+        if save_folder_path.parent.exists():
+            console.print(f"[green]✓ 保存先フォルダ: {save_folder_path}[/green]")
             break
         else:
-            console.print("[red]✗ 指定されたパスが存在しないか、ディレクトリではありません。[/red]")
-
-    # 保存先フォルダ名
-    save_folder = Prompt.ask(
-        "[bold]保存先フォルダ名[/bold]（Vault内の相対パス）",
-        default="recordings"
-    )
-
-    # Whisperモデル選択
-    console.print("\n[bold]使用するWhisperモデルを選択してください:[/bold]")
-    console.print("  1. tiny   (最速・精度低)")
-    console.print("  2. base   (高速・精度中)")
-    console.print("  3. small  (標準)")
-    console.print("  4. medium (精度高・時間かかる)")
-    console.print("  5. large-v3 (最高精度・最も時間かかる)")
-
-    model_map = {
-        "1": "tiny",
-        "2": "base",
-        "3": "small",
-        "4": "medium",
-        "5": "large-v3"
-    }
-
-    while True:
-        choice = Prompt.ask("[bold]選択[/bold]", default="3")
-        if choice in model_map:
-            whisper_model = model_map[choice]
-            console.print(f"[green]✓ モデル '{whisper_model}' を選択しました[/green]")
-            break
-        else:
-            console.print("[red]✗ 1-5の数字を入力してください。[/red]")
+            console.print("[red]✗ 親ディレクトリが存在しません。絶対パスを確認してください。[/red]")
 
     # 文字起こしモード選択
     console.print("\n[bold]文字起こしモードを選択してください:[/bold]")
@@ -106,38 +90,49 @@ def configure_interactive() -> dict:
         else:
             console.print("[red]✗ 1または2を入力してください。[/red]")
 
+    # Whisperモデル選択（ローカルモード時のみ）
+    whisper_model = "small"
+    if transcription_mode == "local":
+        console.print("\n[bold]使用するWhisperモデルを選択してください:[/bold]")
+        console.print("  1. tiny     (最速・精度低)")
+        console.print("  2. base     (高速・精度中)")
+        console.print("  3. small    (標準)")
+        console.print("  4. medium   (精度高・時間かかる)")
+        console.print("  5. large-v3 (最高精度・最も時間かかる)")
+
+        model_map = {"1": "tiny", "2": "base", "3": "small", "4": "medium", "5": "large-v3"}
+        while True:
+            choice = Prompt.ask("[bold]選択[/bold]", default="3")
+            if choice in model_map:
+                whisper_model = model_map[choice]
+                console.print(f"[green]✓ モデル '{whisper_model}' を選択しました[/green]")
+                break
+            else:
+                console.print("[red]✗ 1-5の数字を入力してください。[/red]")
+
     # OpenAI APIキー設定（openaiモード選択時）
     openai_api_key = None
     if transcription_mode == "openai":
-        # 環境変数にあるか確認
         env_key = os.environ.get("OPENAI_API_KEY")
         if env_key:
             console.print("[dim]OPENAI_API_KEYが環境変数で設定されています。[/dim]")
             use_env = Prompt.ask(
                 "[bold]環境変数のキーを使用しますか？[/bold]",
                 choices=["y", "n"],
-                default="y"
+                default="y",
             )
-            if use_env == "y":
-                openai_api_key = None  # 環境変数を使用（設定に保存しない）
-            else:
-                openai_api_key = Prompt.ask("[bold]OpenAI APIキー[/bold]")
+            if use_env != "y":
+                openai_api_key = Prompt.ask("[bold]OpenAI APIキー[/bold]", password=True)
         else:
-            openai_api_key = Prompt.ask(
-                "[bold]OpenAI APIキー[/bold]",
-                password=True
-            )
+            openai_api_key = Prompt.ask("[bold]OpenAI APIキー[/bold]", password=True)
             if openai_api_key:
                 console.print("[green]✓ APIキーを設定しました[/green]")
 
-    config = {
-        "vault_path": str(vault_path),
-        "save_folder": save_folder,
+    config: dict = {
+        "save_folder": str(save_folder_path),
         "whisper_model": whisper_model,
         "transcription_mode": transcription_mode,
     }
-
-    # APIキーを設定に保存（環境変数を使わない場合のみ）
     if openai_api_key:
         config["openai_api_key"] = openai_api_key
 

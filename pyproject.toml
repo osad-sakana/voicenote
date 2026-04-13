@@ -12,10 +12,12 @@ dependencies = [
     "rich",
     "openai>=1.0.0",
     "python-dotenv",
+    "customtkinter",
 ]
 
 [project.scripts]
 voicenote = "main:main"
+voicenote-cli = "main_cli:main"
 
 [tool.setuptools]
-py-modules = ["main", "config", "recorder", "transcriber", "obsidian"]
+py-modules = ["main", "main_cli", "config", "recorder", "transcriber", "obsidian"]

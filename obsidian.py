@@ -3,37 +3,30 @@ Obsidian保存機能モジュール
 文字起こし結果をObsidian Vaultに保存
 """
 
-import sys
 from datetime import datetime
 from pathlib import Path
 
-from rich.console import Console
 
-console = Console()
-
-
-def save_to_obsidian(vault_path: Path, save_folder: str, transcription: str) -> Path:
+def save_to_obsidian(save_folder: Path, transcription: str) -> Path:
     """
-    文字起こし結果をObsidianに保存する
+    文字起こし結果を指定フォルダに保存する
 
     Args:
-        vault_path: Obsidian Vaultのパス
-        save_folder: 保存先フォルダ名（Vault内の相対パス）
+        save_folder: 保存先フォルダの絶対パス
         transcription: 文字起こしされたテキスト
 
     Returns:
         保存されたファイルのパス
+
+    Raises:
+        RuntimeError: 保存失敗時
     """
-    # 保存先ディレクトリの作成
-    save_dir = vault_path / save_folder
-    save_dir.mkdir(parents=True, exist_ok=True)
+    save_folder = Path(save_folder)
+    save_folder.mkdir(parents=True, exist_ok=True)
 
-    # ファイル名生成
     timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-    filename = f"{timestamp}_raw.md"
-    filepath = save_dir / filename
+    filepath = save_folder / f"{timestamp}_raw.md"
 
-    # フロントマターとコンテンツ
     now = datetime.now().isoformat()
     content = f"""---
 created: {now}
@@ -48,8 +41,6 @@ tags:
     try:
         with open(filepath, "w", encoding="utf-8") as f:
             f.write(content)
-        console.print(f"[green]✓ 保存完了[/green]")
         return filepath
     except Exception as e:
-        console.print(f"[red]保存エラー: {e}[/red]")
-        sys.exit(1)
+        raise RuntimeError(f"保存エラー: {e}") from e
