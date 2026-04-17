@@ -52,6 +52,8 @@ def _migrate(config: dict) -> dict:
         del config["vault_path"]
     if "transcription_mode" not in config:
         config = {**config, "transcription_mode": "local"}
+    if "vad_filter" not in config:
+        config = {**config, "vad_filter": True}
     return config
 
 
@@ -128,10 +130,20 @@ def configure_interactive() -> dict:
             if openai_api_key:
                 console.print("[green]✓ APIキーを設定しました[/green]")
 
+    # VADフィルタ設定（ローカルモード時のみ有効）
+    vad_filter = True
+    if transcription_mode == "local":
+        console.print("\n[bold]VAD（音声区間検出）フィルタを有効にしますか？[/bold]")
+        console.print("  有効にすると無音・ノイズ区間を除去し、ループ（Hallucination）を抑制します。")
+        vad_choice = Prompt.ask("[bold]VADフィルタ[/bold]", choices=["y", "n"], default="y")
+        vad_filter = vad_choice == "y"
+        console.print(f"[green]✓ VADフィルタ: {'有効' if vad_filter else '無効'}[/green]")
+
     config: dict = {
         "save_folder": str(save_folder_path),
         "whisper_model": whisper_model,
         "transcription_mode": transcription_mode,
+        "vad_filter": vad_filter,
     }
     if openai_api_key:
         config["openai_api_key"] = openai_api_key
