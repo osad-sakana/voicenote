@@ -17,6 +17,7 @@ from rich.panel import Panel
 from scipy.io import wavfile
 
 from config import configure_interactive, load_config, save_config
+from formatter import format_transcription
 from obsidian import save_to_obsidian
 from recorder import SAMPLE_RATE, print_devices, record_audio, resolve_device_id
 from transcriber import transcribe_with_cli_progress
@@ -89,11 +90,12 @@ def main():
         console.print(f"[cyan]音声ファイル: {audio_file.name}[/cyan]")
         try:
             transcription = transcribe_with_cli_progress(audio_file, config)
+            transcription = format_transcription(transcription, config)
         except Exception as e:
             console.print(f"[red]{e}[/red]")
             sys.exit(1)
         try:
-            saved_path = save_to_obsidian(save_folder, transcription)
+            saved_path = save_to_obsidian(save_folder, transcription, config.get("format_mode", "none"))
         except RuntimeError as e:
             console.print(f"[red]{e}[/red]")
             sys.exit(1)
@@ -127,12 +129,13 @@ def main():
     # 文字起こし
     try:
         transcription = transcribe_with_cli_progress(audio_file, config)
+        transcription = format_transcription(transcription, config)
     except Exception as e:
         console.print(f"[red]{e}[/red]")
         sys.exit(1)
 
     try:
-        saved_path = save_to_obsidian(save_folder, transcription)
+        saved_path = save_to_obsidian(save_folder, transcription, config.get("format_mode", "none"))
     except RuntimeError as e:
         console.print(f"[red]{e}[/red]")
         sys.exit(1)

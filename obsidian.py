@@ -7,13 +7,14 @@ from datetime import datetime
 from pathlib import Path
 
 
-def save_to_obsidian(save_folder: Path, transcription: str) -> Path:
+def save_to_obsidian(save_folder: Path, transcription: str, format_mode: str = "none") -> Path:
     """
     文字起こし結果を指定フォルダに保存する
 
     Args:
         save_folder: 保存先フォルダの絶対パス
         transcription: 文字起こしされたテキスト
+        format_mode: 使用した整形モード（"none"/"rule"/"llm"）
 
     Returns:
         保存されたファイルのパス
@@ -31,6 +32,7 @@ def save_to_obsidian(save_folder: Path, transcription: str) -> Path:
     content = f"""---
 created: {now}
 type: transcription
+format_mode: {format_mode}
 tags:
   - recording
   - raw
