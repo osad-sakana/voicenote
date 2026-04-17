@@ -18,6 +18,7 @@ from scipy.io import wavfile
 load_dotenv()
 
 from config import load_config, save_config
+from formatter import format_transcription
 from obsidian import save_to_obsidian
 from recorder import SAMPLE_RATE, ThreadedRecorder, list_devices
 from transcriber import transcribe_audio, transcribe_audio_openai
@@ -429,8 +430,15 @@ class App(ctk.CTk):
             self._safe_after(self._reset_ui)
             return
 
+        format_mode = self._config.get("format_mode", "none")
+        if format_mode != "none":
+            on_progress("テキスト整形中...")
+            transcription = format_transcription(transcription, self._config)
+
         try:
-            saved_path = save_to_obsidian(Path(self._config["save_folder"]), transcription)
+            saved_path = save_to_obsidian(
+                Path(self._config["save_folder"]), transcription, format_mode
+            )
         except RuntimeError as e:
             self._safe_after(self._log, f"保存エラー: {e}")
             self._safe_after(self._reset_ui)

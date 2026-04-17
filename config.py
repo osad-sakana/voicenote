@@ -54,6 +54,8 @@ def _migrate(config: dict) -> dict:
         config = {**config, "transcription_mode": "local"}
     if "vad_filter" not in config:
         config = {**config, "vad_filter": True}
+    if "format_mode" not in config:
+        config = {**config, "format_mode": "rule"}
     return config
 
 
@@ -139,11 +141,44 @@ def configure_interactive() -> dict:
         vad_filter = vad_choice == "y"
         console.print(f"[green]✓ VADフィルタ: {'有効' if vad_filter else '無効'}[/green]")
 
+    # 整形モード選択
+    console.print("\n[bold]文字起こし結果の整形モードを選択してください:[/bold]")
+    console.print("  1. rule  （ルールベース整形 - 句読点補完・フィラー語除去）")
+    console.print("  2. llm   （GPT-4o-miniで高品質整形 - OPENAI_API_KEY必要）")
+    console.print("  3. none  （整形なし - 生テキスト）")
+
+    format_mode = "rule"
+    while True:
+        fmt_choice = Prompt.ask("[bold]選択[/bold]", default="1")
+        if fmt_choice == "1":
+            format_mode = "rule"
+            console.print("[green]✓ ルールベース整形を選択しました[/green]")
+            break
+        elif fmt_choice == "2":
+            import os as _os
+            api_key_available = _os.environ.get("OPENAI_API_KEY") or openai_api_key
+            if not api_key_available:
+                console.print(
+                    "[yellow]⚠ OPENAI_API_KEYが設定されていません。ルールベース整形を使用します。[/yellow]"
+                )
+                format_mode = "rule"
+            else:
+                format_mode = "llm"
+                console.print("[green]✓ LLM整形（GPT-4o-mini）を選択しました[/green]")
+            break
+        elif fmt_choice == "3":
+            format_mode = "none"
+            console.print("[green]✓ 整形なしを選択しました[/green]")
+            break
+        else:
+            console.print("[red]✗ 1・2・3のいずれかを入力してください。[/red]")
+
     config: dict = {
         "save_folder": str(save_folder_path),
         "whisper_model": whisper_model,
         "transcription_mode": transcription_mode,
         "vad_filter": vad_filter,
+        "format_mode": format_mode,
     }
     if openai_api_key:
         config["openai_api_key"] = openai_api_key
