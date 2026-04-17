@@ -422,6 +422,7 @@ class App(ctk.CTk):
                     audio_file,
                     self._config.get("whisper_model", "small"),
                     progress_callback=on_progress,
+                    vad_filter=self._config.get("vad_filter", True),
                 )
         except Exception as e:
             self._safe_after(self._log, f"文字起こしエラー: {e}")
