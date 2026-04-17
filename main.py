@@ -350,8 +350,8 @@ class App(ctk.CTk):
         try:
             audio_data = self._recorder.get_data()
         except RuntimeError as e:
-            self._set_status("エラー")
             self._log(f"エラー: {e}")
+            self._reset_ui()
             return
 
         # ウィジェットの値はメインスレッドで取得してからスレッドに渡す
@@ -373,13 +373,13 @@ class App(ctk.CTk):
             audio_file = self._write_wav(audio_data, rec_dest)
             self._safe_after(self._log, f"音声ファイルを保存: {audio_file.name}")
         except Exception as e:
-            self._safe_after(self._set_status, f"エラー: {e}")
             self._safe_after(self._log, f"エラー: {e}")
+            self._safe_after(self._reset_ui)
             return
 
         if mode == MODE_RECORD_ONLY:
-            self._safe_after(self._set_status, "完了!")
-            self._safe_after(self._log, f"保存完了 → {audio_file}")
+            self._safe_after(self._log, f"録音完了 → {audio_file}")
+            self._safe_after(self._reset_ui)
             return
 
         self._run_transcription(audio_file)
@@ -407,6 +407,8 @@ class App(ctk.CTk):
         mode = self._config.get("transcription_mode", "local")
         start_time = time.time()
 
+        self._safe_after(self._log, "文字起こし開始...")
+
         def on_progress(msg: str):
             elapsed = time.time() - start_time
             self._safe_after(self._set_status, f"{msg} ({elapsed:.1f}s)")
@@ -422,22 +424,19 @@ class App(ctk.CTk):
                     progress_callback=on_progress,
                 )
         except Exception as e:
-            self._safe_after(self._set_status, f"エラー: {e}")
             self._safe_after(self._log, f"文字起こしエラー: {e}")
-            self._safe_after(self._exec_btn.configure, {"state": "normal"})
+            self._safe_after(self._reset_ui)
             return
 
         try:
             saved_path = save_to_obsidian(Path(self._config["save_folder"]), transcription)
         except RuntimeError as e:
-            self._safe_after(self._set_status, f"エラー: {e}")
             self._safe_after(self._log, f"保存エラー: {e}")
-            self._safe_after(self._exec_btn.configure, {"state": "normal"})
+            self._safe_after(self._reset_ui)
             return
 
-        self._safe_after(self._set_status, "完了!")
-        self._safe_after(self._log, f"保存完了 → {saved_path}")
-        self._safe_after(self._exec_btn.configure, {"state": "normal"})
+        self._safe_after(self._log, f"文字起こし完了 → {saved_path}")
+        self._safe_after(self._reset_ui)
 
     # ──────────────── ウィンドウ終了 ────────────────
 
@@ -457,6 +456,11 @@ class App(ctk.CTk):
         """バックグラウンドスレッドからスレッドセーフにUI更新をスケジュールする"""
         if self._alive:
             self.after(0, fn, *args)
+
+    def _reset_ui(self):
+        """処理完了後にUIを待機状態に戻す"""
+        self._set_status("待機中")
+        self._exec_btn.configure(state="normal", text="実行", fg_color=["#3B8ED0", "#1F6AA5"])
 
     def _set_status(self, text: str):
         self._status_label.configure(text=text)
