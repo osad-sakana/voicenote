@@ -5,6 +5,7 @@ VoiceNote GUIエントリーポイント（CustomTkinter）
 
 import logging
 import os
+import queue
 import threading
 import time
 import traceback
@@ -165,12 +166,14 @@ class App(ctk.CTk):
         self._recording = False
         self._elapsed = 0
         self._alive = True
+        self._ui_queue: queue.Queue = queue.Queue()
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self._build_ui()
         self._load_config()
         self._refresh_devices()
         self._on_mode_change()
+        self._poll_ui_queue()
 
     # ──────────────── UI構築 ────────────────
 
@@ -496,10 +499,21 @@ class App(ctk.CTk):
 
     # ──────────────── ユーティリティ ────────────────
 
-    def _safe_after(self, fn, *args):
-        """バックグラウンドスレッドからスレッドセーフにUI更新をスケジュールする"""
+    def _poll_ui_queue(self):
+        """メインスレッドでキューを処理する（50ms間隔）"""
+        try:
+            while True:
+                fn, args = self._ui_queue.get_nowait()
+                fn(*args)
+        except queue.Empty:
+            pass
         if self._alive:
-            self.after(0, fn, *args)
+            self.after(50, self._poll_ui_queue)
+
+    def _safe_after(self, fn, *args):
+        """バックグラウンドスレッドからスレッドセーフにUI更新をキューに積む"""
+        if self._alive:
+            self._ui_queue.put((fn, args))
 
     def _set_processing(self, busy: bool):
         """処理中はUI全体をロック／解除する"""
