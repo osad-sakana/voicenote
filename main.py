@@ -380,6 +380,7 @@ class App(ctk.CTk):
         rec_dest = Path(self._rec_dest_entry.get().strip() or str(Path.home() / "Desktop"))
         mode = self._mode_var.get()
         self._set_processing(True)
+        self._exec_btn.configure(text="文字起こし中...")
         threading.Thread(target=self._process_audio, args=(audio_data, rec_dest, mode), daemon=True).start()
 
     def _timer_loop(self):
@@ -430,6 +431,7 @@ class App(ctk.CTk):
             messagebox.showwarning("設定が必要", "先に ⚙ 設定から文字起こし保存フォルダを設定してください")
             return
         self._set_processing(True)
+        self._exec_btn.configure(text="文字起こし中...")
         threading.Thread(target=self._run_transcription, args=(Path(audio_path),), daemon=True).start()
 
     def _run_transcription(self, audio_file: Path):
