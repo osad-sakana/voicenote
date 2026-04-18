@@ -519,7 +519,9 @@ class App(ctk.CTk):
     def _show_completion(self, saved_path: Path):
         """文字起こし完了をダイアログで通知してからUIをリセット"""
         self._set_status("✓ 文字起こし完了")
-        messagebox.showinfo("完了", f"文字起こしが完了しました。\n\n{saved_path.name}")
+        self.lift()
+        self.focus_force()
+        messagebox.showinfo("完了", f"文字起こしが完了しました。\n\n{saved_path.name}", parent=self)
         self._reset_ui()
 
     def _set_status(self, text: str):
