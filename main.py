@@ -512,17 +512,17 @@ class App(ctk.CTk):
 
     def _reset_ui(self):
         """処理完了後にUIを待機状態に戻す"""
-        self._set_status("待機中")
+        self._status_label.configure(text="待機中", text_color=("gray14", "gray84"))
         self._exec_btn.configure(text="実行", fg_color=["#3B8ED0", "#1F6AA5"])
         self._set_processing(False)
 
     def _show_completion(self, saved_path: Path):
-        """文字起こし完了をダイアログで通知してからUIをリセット"""
-        self._set_status("✓ 文字起こし完了")
-        self.lift()
-        self.focus_force()
-        messagebox.showinfo("完了", f"文字起こしが完了しました。\n\n{saved_path.name}", parent=self)
-        self._reset_ui()
+        """文字起こし完了をウィンドウ内に表示し、3秒後にリセット"""
+        self._set_processing(False)
+        self._exec_btn.configure(text="実行", fg_color=["#3B8ED0", "#1F6AA5"])
+        self._status_label.configure(text=f"✓ 完了: {saved_path.name}", text_color="green")
+        self.bell()
+        self.after(3000, self._reset_ui)
 
     def _set_status(self, text: str):
         self._status_label.configure(text=text)
