@@ -3,9 +3,11 @@
 VoiceNote GUIエントリーポイント（CustomTkinter）
 """
 
+import logging
 import os
 import threading
 import time
+import traceback
 from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox
@@ -16,6 +18,18 @@ from dotenv import load_dotenv
 from scipy.io import wavfile
 
 load_dotenv()
+
+# ── ファイルロギング設定 ──────────────────────────────────
+_LOG_DIR = Path(__file__).parent / "logs"
+_LOG_DIR.mkdir(exist_ok=True)
+_log_file = _LOG_DIR / f"{datetime.now().strftime('%Y-%m-%d_%H%M%S')}.log"
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[logging.FileHandler(_log_file, encoding="utf-8")],
+)
+_logger = logging.getLogger("voicenote")
+# ─────────────────────────────────────────────────────────
 
 from config import load_config, save_config
 from formatter import format_transcription
@@ -252,6 +266,7 @@ class App(ctk.CTk):
             self._log("設定を読み込みました")
         else:
             self._log("設定が見つかりません。⚙ 設定から保存フォルダを設定してください")
+        self._log(f"ログファイル: {_log_file}")
 
     def _open_settings(self):
         dialog = SettingsDialog(self, self._config)
@@ -326,6 +341,7 @@ class App(ctk.CTk):
             return
 
         device_id = self._selected_device_id()
+        device_label = self._device_var.get()
         self._recorder = ThreadedRecorder(device_id)
         try:
             self._recorder.start()
@@ -336,24 +352,26 @@ class App(ctk.CTk):
         self._recording = True
         self._elapsed = 0
         self._exec_btn.configure(text="⏹  録音停止", fg_color="red")
-        self._log("録音開始")
+        self._log(f"録音開始 (デバイス: {device_label})")
         threading.Thread(target=self._timer_loop, daemon=True).start()
 
     def _stop_recording(self):
         self._recording = False
         self._exec_btn.configure(text="実行", fg_color=["#3B8ED0", "#1F6AA5"])
         self._set_status("保存中...")
-        self._log("録音停止")
+        self._log("録音停止 → ストリームを閉じています...")
 
         if self._recorder is None:
             return
         self._recorder.stop()
+        self._log("ストリームを閉じました。データを結合中...")
         try:
             audio_data = self._recorder.get_data()
         except RuntimeError as e:
             self._log(f"エラー: {e}")
             self._reset_ui()
             return
+        self._log(f"録音データ取得完了 ({len(audio_data) / 16000:.1f}秒)")
 
         # ウィジェットの値はメインスレッドで取得してからスレッドに渡す
         rec_dest = Path(self._rec_dest_entry.get().strip() or str(Path.home() / "Desktop"))
@@ -371,19 +389,25 @@ class App(ctk.CTk):
 
     def _process_audio(self, audio_data: np.ndarray, rec_dest: Path, mode: str):
         try:
-            audio_file = self._write_wav(audio_data, rec_dest)
-            self._safe_after(self._log, f"音声ファイルを保存: {audio_file.name}")
-        except Exception as e:
-            self._safe_after(self._log, f"エラー: {e}")
-            self._safe_after(self._reset_ui)
-            return
+            self._safe_after(self._log, f"WAVファイルを書き込み中... → {rec_dest}")
+            try:
+                audio_file = self._write_wav(audio_data, rec_dest)
+                self._safe_after(self._log, f"✓ 音声ファイルを保存: {audio_file.name}")
+            except Exception as e:
+                self._safe_after(self._log, f"エラー: {e}")
+                self._safe_after(self._reset_ui)
+                return
 
-        if mode == MODE_RECORD_ONLY:
-            self._safe_after(self._log, f"録音完了 → {audio_file}")
-            self._safe_after(self._reset_ui)
-            return
+            if mode == MODE_RECORD_ONLY:
+                self._safe_after(self._log, f"録音完了 → {audio_file}")
+                self._safe_after(self._reset_ui)
+                return
 
-        self._run_transcription(audio_file)
+            self._run_transcription(audio_file)
+        except Exception:
+            _logger.error("_process_audio で未捕捉の例外:\n%s", traceback.format_exc())
+            self._safe_after(self._log, f"予期せぬエラーが発生しました（ログを確認: {_log_file.name}）")
+            self._safe_after(self._reset_ui)
 
     def _write_wav(self, audio_data: np.ndarray, dest_dir: Path) -> Path:
         dest_dir.mkdir(parents=True, exist_ok=True)
@@ -405,6 +429,7 @@ class App(ctk.CTk):
         threading.Thread(target=self._run_transcription, args=(Path(audio_path),), daemon=True).start()
 
     def _run_transcription(self, audio_file: Path):
+        _logger.debug("_run_transcription 開始: %s", audio_file)
         mode = self._config.get("transcription_mode", "local")
         start_time = time.time()
 
@@ -431,20 +456,24 @@ class App(ctk.CTk):
             return
 
         format_mode = self._config.get("format_mode", "none")
+        _logger.debug("format_mode: %s", format_mode)
         if format_mode != "none":
             on_progress("テキスト整形中...")
             transcription = format_transcription(transcription, self._config)
+        _logger.debug("整形完了。save_to_obsidian を呼び出します")
 
         try:
             saved_path = save_to_obsidian(
                 Path(self._config["save_folder"]), transcription, format_mode
             )
-        except RuntimeError as e:
+        except Exception as e:
+            _logger.error("save_to_obsidian エラー:\n%s", traceback.format_exc())
             self._safe_after(self._log, f"保存エラー: {e}")
             self._safe_after(self._reset_ui)
             return
 
-        self._safe_after(self._log, f"文字起こし完了 → {saved_path}")
+        _logger.debug("保存完了: %s", saved_path)
+        self._safe_after(self._log, f"✓ 文字起こし完了 → {saved_path}")
         self._safe_after(self._reset_ui)
 
     # ──────────────── ウィンドウ終了 ────────────────
@@ -476,6 +505,8 @@ class App(ctk.CTk):
 
     def _log(self, msg: str):
         timestamp = datetime.now().strftime("%H:%M:%S")
+        print(f"[{timestamp}] {msg}", flush=True)
+        _logger.info(msg)
         self._log_box.configure(state="normal")
         self._log_box.insert("end", f"[{timestamp}] {msg}\n")
         self._log_box.see("end")

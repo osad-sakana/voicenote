@@ -1,6 +1,9 @@
 # 設定ファイル（個人情報が含まれる可能性があるため）
 config.json
 
+# ログ
+logs/
+
 # 一時ファイル
 temp_recording.wav
 *.wav
