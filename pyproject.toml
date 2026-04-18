@@ -21,3 +21,8 @@ voicenote-cli = "main_cli:main"
 
 [tool.setuptools]
 py-modules = ["main", "main_cli", "config", "recorder", "transcriber", "obsidian"]
+
+[dependency-groups]
+dev = [
+    "pyinstaller>=6.19.0",
+]

@@ -4,6 +4,11 @@ config.json
 # ログ
 logs/
 
+# ビルド成果物
+build/
+dist/
+*.spec
+
 # 一時ファイル
 temp_recording.wav
 *.wav
