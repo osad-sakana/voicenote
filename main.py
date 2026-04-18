@@ -23,12 +23,13 @@ load_dotenv()
 _LOG_DIR = Path(__file__).parent / "logs"
 _LOG_DIR.mkdir(exist_ok=True)
 _log_file = _LOG_DIR / f"{datetime.now().strftime('%Y-%m-%d_%H%M%S')}.log"
-logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[logging.FileHandler(_log_file, encoding="utf-8")],
-)
+_file_handler = logging.FileHandler(_log_file, encoding="utf-8")
+_file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+# voicenote 自身は DEBUG、OpenAI SDK 等の外部ライブラリは WARNING 以上のみ記録
+logging.getLogger().setLevel(logging.WARNING)
 _logger = logging.getLogger("voicenote")
+_logger.setLevel(logging.DEBUG)
+_logger.addHandler(_file_handler)
 # ─────────────────────────────────────────────────────────
 
 from config import load_config, save_config
@@ -178,17 +179,19 @@ class App(ctk.CTk):
         header = ctk.CTkFrame(self, fg_color="transparent")
         header.pack(fill="x", padx=20, pady=(12, 4))
         ctk.CTkLabel(header, text="VoiceNote", font=ctk.CTkFont(size=16, weight="bold")).pack(side="left")
-        ctk.CTkButton(header, text="⚙  設定", width=80, fg_color="gray", command=self._open_settings).pack(side="right")
+        self._settings_btn = ctk.CTkButton(header, text="⚙  設定", width=80, fg_color="gray", command=self._open_settings)
+        self._settings_btn.pack(side="right")
 
         # モード選択
         ctk.CTkLabel(self, text="モード", anchor="w").pack(fill="x", padx=20, pady=(8, 2))
         self._mode_var = ctk.StringVar(value=MODE_RECORD_TRANSCRIBE)
-        ctk.CTkOptionMenu(
+        self._mode_menu = ctk.CTkOptionMenu(
             self,
             variable=self._mode_var,
             values=MODES,
             command=lambda _: self._on_mode_change(),
-        ).pack(fill="x", padx=20, pady=2)
+        )
+        self._mode_menu.pack(fill="x", padx=20, pady=2)
 
         # 動的パネル（モードに応じて表示切替）
         self._panel = ctk.CTkFrame(self, fg_color="transparent")
@@ -376,6 +379,7 @@ class App(ctk.CTk):
         # ウィジェットの値はメインスレッドで取得してからスレッドに渡す
         rec_dest = Path(self._rec_dest_entry.get().strip() or str(Path.home() / "Desktop"))
         mode = self._mode_var.get()
+        self._set_processing(True)
         threading.Thread(target=self._process_audio, args=(audio_data, rec_dest, mode), daemon=True).start()
 
     def _timer_loop(self):
@@ -425,7 +429,7 @@ class App(ctk.CTk):
         if not self._config.get("save_folder"):
             messagebox.showwarning("設定が必要", "先に ⚙ 設定から文字起こし保存フォルダを設定してください")
             return
-        self._exec_btn.configure(state="disabled")
+        self._set_processing(True)
         threading.Thread(target=self._run_transcription, args=(Path(audio_path),), daemon=True).start()
 
     def _run_transcription(self, audio_file: Path):
@@ -474,7 +478,7 @@ class App(ctk.CTk):
 
         _logger.debug("保存完了: %s", saved_path)
         self._safe_after(self._log, f"✓ 文字起こし完了 → {saved_path}")
-        self._safe_after(self._reset_ui)
+        self._safe_after(self._show_completion, saved_path)
 
     # ──────────────── ウィンドウ終了 ────────────────
 
@@ -495,10 +499,26 @@ class App(ctk.CTk):
         if self._alive:
             self.after(0, fn, *args)
 
+    def _set_processing(self, busy: bool):
+        """処理中はUI全体をロック／解除する"""
+        state = "disabled" if busy else "normal"
+        self._exec_btn.configure(state=state)
+        self._settings_btn.configure(state=state)
+        self._mode_menu.configure(state=state)
+        self._device_menu.configure(state=state)
+        self._rec_dest_entry.configure(state=state)
+
     def _reset_ui(self):
         """処理完了後にUIを待機状態に戻す"""
         self._set_status("待機中")
-        self._exec_btn.configure(state="normal", text="実行", fg_color=["#3B8ED0", "#1F6AA5"])
+        self._exec_btn.configure(text="実行", fg_color=["#3B8ED0", "#1F6AA5"])
+        self._set_processing(False)
+
+    def _show_completion(self, saved_path: Path):
+        """文字起こし完了をダイアログで通知してからUIをリセット"""
+        self._set_status("✓ 文字起こし完了")
+        messagebox.showinfo("完了", f"文字起こしが完了しました。\n\n{saved_path.name}")
+        self._reset_ui()
 
     def _set_status(self, text: str):
         self._status_label.configure(text=text)
