@@ -6,6 +6,7 @@ VoiceNote GUIエントリーポイント（CustomTkinter）
 import logging
 import os
 import queue
+import re
 import threading
 import time
 import traceback
@@ -40,6 +41,21 @@ from recorder import SAMPLE_RATE, ThreadedRecorder, list_devices
 from transcriber import transcribe_audio, transcribe_audio_openai
 
 CONFIG_PATH = Path.home() / ".config" / "voicenote" / "config.json"
+
+_EMOJI_RE = re.compile(
+    "["
+    "\U0001F000-\U0001FFFF"
+    "⌀-⟿"
+    "⤀-⯿"
+    "​-‏"
+    "︀-️"
+    "]+",
+    flags=re.UNICODE,
+)
+
+
+def _strip_emoji(text: str) -> str:
+    return _EMOJI_RE.sub("", text).strip()
 
 MODE_RECORD_TRANSCRIBE = "録音して文字起こしする"
 MODE_RECORD_ONLY = "録音だけする"
@@ -99,7 +115,7 @@ class SettingsDialog(ctk.CTkToplevel):
         # APIキー（OpenAI用）
         self._apikey_label = ctk.CTkLabel(self, text="OpenAI APIキー", anchor="w")
         self._apikey_label.pack(fill="x", **pad)
-        self._apikey_entry = ctk.CTkEntry(self, show="●")
+        self._apikey_entry = ctk.CTkEntry(self, show="*")
         self._apikey_entry.pack(fill="x", padx=20, pady=2)
 
         # ボタン
@@ -294,7 +310,7 @@ class App(ctk.CTk):
     def _refresh_devices(self):
         try:
             devices = list_devices()
-            names = [f"[{d['id']}] {d['name']}" for d in devices]
+            names = [f"[{d['id']}] {_strip_emoji(d['name'])}" for d in devices]
             if not names:
                 names = ["デバイスなし"]
             self._device_menu.configure(values=names)
@@ -389,7 +405,7 @@ class App(ctk.CTk):
     def _timer_loop(self):
         while self._recording:
             mins, secs = divmod(self._elapsed, 60)
-            self._safe_after(self._set_status, f"⏺  {mins:02d}:{secs:02d}  録音中...")
+            self._safe_after(self._set_status, f"[REC]  {mins:02d}:{secs:02d}  録音中...")
             time.sleep(1)
             self._elapsed += 1
 
