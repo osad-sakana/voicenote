@@ -75,7 +75,7 @@ class SettingsDialog(ctk.CTkToplevel):
         folder_frame.pack(fill="x", padx=20, pady=2)
         self._folder_entry = ctk.CTkEntry(folder_frame)
         self._folder_entry.pack(side="left", fill="x", expand=True)
-        ctk.CTkButton(folder_frame, text="📁", width=36, command=self._browse_folder).pack(side="left", padx=(4, 0))
+        ctk.CTkButton(folder_frame, text="...", width=36, command=self._browse_folder).pack(side="left", padx=(4, 0))
 
         # 文字起こしモード
         ctk.CTkLabel(self, text="文字起こしモード", anchor="w").pack(fill="x", **pad)
@@ -182,7 +182,7 @@ class App(ctk.CTk):
         header = ctk.CTkFrame(self, fg_color="transparent")
         header.pack(fill="x", padx=20, pady=(12, 4))
         ctk.CTkLabel(header, text="VoiceNote", font=ctk.CTkFont(size=16, weight="bold")).pack(side="left")
-        self._settings_btn = ctk.CTkButton(header, text="⚙  設定", width=80, fg_color="gray", command=self._open_settings)
+        self._settings_btn = ctk.CTkButton(header, text="設定", width=80, fg_color="gray", command=self._open_settings)
         self._settings_btn.pack(side="right")
 
         # モード選択
@@ -214,7 +214,7 @@ class App(ctk.CTk):
         self._rec_dest_entry = ctk.CTkEntry(rec_dest_row)
         self._rec_dest_entry.insert(0, str(Path.home() / "Desktop"))
         self._rec_dest_entry.pack(side="left", fill="x", expand=True)
-        ctk.CTkButton(rec_dest_row, text="📁", width=36, command=self._browse_rec_dest).pack(side="left", padx=(4, 0))
+        ctk.CTkButton(rec_dest_row, text="...", width=36, command=self._browse_rec_dest).pack(side="left", padx=(4, 0))
 
         # --- 文字起こしのみ用ウィジェット ---
         self._file_section = ctk.CTkFrame(self._panel, fg_color="transparent")
@@ -223,7 +223,7 @@ class App(ctk.CTk):
         file_row.pack(fill="x", pady=2)
         self._file_entry = ctk.CTkEntry(file_row, placeholder_text="ファイルを選択してください")
         self._file_entry.pack(side="left", fill="x", expand=True)
-        ctk.CTkButton(file_row, text="📂", width=36, command=self._browse_audio_file).pack(side="left", padx=(4, 0))
+        ctk.CTkButton(file_row, text="...", width=36, command=self._browse_audio_file).pack(side="left", padx=(4, 0))
 
         # 実行ボタン
         self._exec_btn = ctk.CTkButton(
@@ -271,7 +271,7 @@ class App(ctk.CTk):
                 os.environ["OPENAI_API_KEY"] = config["openai_api_key"]
             self._log("設定を読み込みました")
         else:
-            self._log("設定が見つかりません。⚙ 設定から保存フォルダを設定してください")
+            self._log("設定が見つかりません。設定から保存フォルダを設定してください")
         self._log(f"ログファイル: {_log_file}")
 
     def _open_settings(self):
@@ -343,7 +343,7 @@ class App(ctk.CTk):
     def _start_recording(self):
         mode = self._mode_var.get()
         if mode == MODE_RECORD_TRANSCRIBE and not self._config.get("save_folder"):
-            messagebox.showwarning("設定が必要", "先に ⚙ 設定から文字起こし保存フォルダを設定してください")
+            messagebox.showwarning("設定が必要", "先に 設定から文字起こし保存フォルダを設定してください")
             return
 
         device_id = self._selected_device_id()
@@ -357,7 +357,7 @@ class App(ctk.CTk):
 
         self._recording = True
         self._elapsed = 0
-        self._exec_btn.configure(text="⏹  録音停止", fg_color="red")
+        self._exec_btn.configure(text="録音停止", fg_color="red")
         self._log(f"録音開始 (デバイス: {device_label})")
         threading.Thread(target=self._timer_loop, daemon=True).start()
 
@@ -400,7 +400,7 @@ class App(ctk.CTk):
             self._safe_after(self._log, f"WAVファイルを書き込み中... → {rec_dest}")
             try:
                 audio_file = self._write_wav(audio_data, rec_dest)
-                self._safe_after(self._log, f"✓ 音声ファイルを保存: {audio_file.name}")
+                self._safe_after(self._log, f"音声ファイルを保存: {audio_file.name}")
             except Exception as e:
                 self._safe_after(self._log, f"エラー: {e}")
                 self._safe_after(self._reset_ui)
@@ -431,7 +431,7 @@ class App(ctk.CTk):
             messagebox.showwarning("ファイル未選択", "音声ファイルを選択してください")
             return
         if not self._config.get("save_folder"):
-            messagebox.showwarning("設定が必要", "先に ⚙ 設定から文字起こし保存フォルダを設定してください")
+            messagebox.showwarning("設定が必要", "先に 設定から文字起こし保存フォルダを設定してください")
             return
         self._set_processing(True)
         self._exec_btn.configure(text="文字起こし中...")
@@ -482,7 +482,7 @@ class App(ctk.CTk):
             return
 
         _logger.debug("保存完了: %s", saved_path)
-        self._safe_after(self._log, f"✓ 文字起こし完了 → {saved_path}")
+        self._safe_after(self._log, f"文字起こし完了 → {saved_path}")
         self._safe_after(self._show_completion, saved_path)
 
     # ──────────────── ウィンドウ終了 ────────────────
@@ -534,7 +534,7 @@ class App(ctk.CTk):
         """文字起こし完了をウィンドウ内に表示し、3秒後にリセット"""
         self._set_processing(False)
         self._exec_btn.configure(text="実行", fg_color=["#3B8ED0", "#1F6AA5"])
-        self._status_label.configure(text=f"✓ 完了: {saved_path.name}", text_color="green")
+        self._status_label.configure(text=f"完了: {saved_path.name}", text_color="green")
         self.bell()
         self.after(3000, self._reset_ui)
 
