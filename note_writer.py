@@ -1,15 +1,17 @@
 """
-Obsidian保存機能モジュール
-文字起こし結果をObsidian Vaultに保存
+ノート保存モジュール。
+
+文字起こし結果を YAML frontmatter 付きの Markdown ファイルとして指定フォルダに保存する。
+frontmatter は Obsidian の規約に準拠しているが、他の Markdown ベースのノートツールでも
+そのまま利用できる。
 """
 
 from datetime import datetime
 from pathlib import Path
 
 
-def save_to_obsidian(save_folder: Path, transcription: str, format_mode: str = "none") -> Path:
-    """
-    文字起こし結果を指定フォルダに保存する
+def save_transcript(save_folder: Path, transcription: str, format_mode: str = "none") -> Path:
+    """文字起こし結果を `save_folder/YYYY-MM-DD_HHMMSS_raw.md` として保存する。
 
     Args:
         save_folder: 保存先フォルダの絶対パス

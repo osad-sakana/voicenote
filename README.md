@@ -1,6 +1,6 @@
 # voicenote
 
-ローカルで音声を録音し、faster-whisperで文字起こしを行い、Obsidianに保存するPythonツールです。
+ローカルで音声を録音し、faster-whisperで文字起こしを行い、Markdownノートとして保存するPythonツールです (Obsidianなどのノートツールと互換)。
 
 ## 必要要件
 
@@ -57,9 +57,10 @@ uv run main.py
 > `uv run` は実行前に自動的に依存関係を同期します。
 
 以下の項目を入力します:
-- Obsidian Vaultの絶対パス
-- 保存先フォルダ名（Vault内の相対パス）
+- ノート保存フォルダの絶対パス（Obsidian Vault内などお好みの場所）
+- 文字起こしモード（local: faster-whisper / openai: Whisper API）
 - 使用するWhisperモデル（tiny, base, small, medium, large-v3）
+- テキスト整形モード（none / rule / llm）
 
 ### 2回目以降
 
@@ -81,7 +82,7 @@ uv run main.py --config
 
 ## 出力形式
 
-文字起こし結果は以下の形式でObsidianに保存されます:
+文字起こし結果は以下の形式でMarkdownノートとして保存されます:
 
 ```markdown
 ---
@@ -103,14 +104,18 @@ tags:
 
 ```
 voicenote/
-├── main.py              # メインエントリーポイント
+├── main.py              # GUIエントリーポイント (CustomTkinter)
+├── main_cli.py          # CLIエントリーポイント (Rich)
+├── pipeline.py          # GUI/CLI共通の業務ロジック
+├── logging_setup.py     # ロギング初期化
 ├── config.py            # 設定管理モジュール
 ├── recorder.py          # 録音機能モジュール
 ├── transcriber.py       # 文字起こし機能モジュール
-├── obsidian.py          # Obsidian保存機能モジュール
+├── formatter.py         # テキスト整形モジュール
+├── note_writer.py       # Markdownノート保存モジュール
+├── gui/                 # GUI 関連 (App, SettingsDialog, etc.)
+├── tests/               # ユニットテスト
 ├── pyproject.toml       # プロジェクト設定・依存関係
-├── config.json          # 設定ファイル（自動生成）
-├── .gitignore
 └── README.md
 ```
 
@@ -120,6 +125,6 @@ voicenote/
 - ✅ 対話的な設定管理
 - ✅ リアルタイム録音
 - ✅ faster-whisperによる高精度な文字起こし
-- ✅ Obsidianへの自動保存（フロントマター付き）
+- ✅ Markdownノートとしての自動保存（YAMLフロントマター付き、Obsidian互換）
 - ✅ Richライブラリによる美しいUI
 - ✅ モジュール化された綺麗なコード構造

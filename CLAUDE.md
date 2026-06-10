@@ -8,7 +8,7 @@ voicenote is a voice recording and transcription tool that:
 - Records audio using sounddevice
 - Saves audio files to Desktop as WAV format
 - Transcribes using faster-whisper (local) or OpenAI Whisper API (cloud)
-- Saves transcriptions to Obsidian vault with frontmatter
+- Saves transcriptions as Markdown notes with YAML frontmatter (Obsidian-compatible, but any Markdown note tool works)
 
 ## Environment Variables
 
@@ -44,31 +44,35 @@ Dependencies are managed in `pyproject.toml`. Use `uv sync` to install dependenc
 
 ### Module Responsibilities
 
-- **main.py**: Orchestrates the complete workflow (config → record → transcribe → save)
+- **main.py**: GUI entry point (CustomTkinter)
+- **main_cli.py**: CLI entry point (Rich)
+- **pipeline.py**: Shared business logic — `load_or_configure`, `save_wav`, `transcribe_and_save`
+- **logging_setup.py**: Logging initialization (shared by GUI and CLI)
 - **config.py**: Handles config.json persistence and interactive setup via rich prompts
 - **recorder.py**: Real-time audio recording with SIGINT handling for Ctrl+C stop
 - **transcriber.py**: Whisper model loading and transcription with progress indicators
-- **obsidian.py**: Markdown file generation with YAML frontmatter
+- **formatter.py**: Rule-based and LLM-based transcription text formatting
+- **note_writer.py**: Markdown note file generation with YAML frontmatter (Obsidian-compatible)
+- **gui/**: GUI components — App (main window), SettingsDialog, ThreadSafeUIQueue, constants
 
 ### Data Flow
 
+Both GUI (`main.py`) and CLI (`main_cli.py`) delegate the core workflow to `pipeline.py`.
+
 **Recording Mode (default)**:
-1. **Configuration Phase**: `main.py` → `config.py` (load/interactive setup) → `config.json`
-2. **Recording Phase**: `main.py` → `recorder.py` (sounddevice stream with callback) → numpy array
-3. **Save Phase**: `main.py` converts float32 → int16 → WAV file saved to `~/Desktop/YYYY-MM-DD_HHMMSS_recording.wav`
-4. **Transcription Phase**: `main.py` → `transcriber.py` (faster-whisper) → text string
-5. **Obsidian Save Phase**: `main.py` → `obsidian.py` → `{vault_path}/{save_folder}/YYYY-MM-DD_HHMMSS_raw.md`
+1. **Configuration Phase**: entry → `pipeline.load_or_configure` → `config.json`
+2. **Recording Phase**: entry → `recorder.py` (sounddevice stream with callback) → numpy array
+3. **WAV Save Phase**: entry → `pipeline.save_wav` → WAV file at `~/Desktop/YYYY-MM-DD_HHMMSS_recording.wav` (CLI) or selected folder (GUI)
+4. **Transcribe + Note Save Phase**: entry → `pipeline.transcribe_and_save` → `transcriber.py` → `formatter.py` (optional) → `note_writer.save_transcript` → `{save_folder}/YYYY-MM-DD_HHMMSS_raw.md`
 
-**Record-Only Mode (`--record-only` argument)**:
-1. **Configuration Phase**: `main.py` → `config.py` (load/interactive setup) → `config.json`
-2. **Recording Phase**: `main.py` → `recorder.py` (sounddevice stream with callback) → numpy array
-3. **Save Phase**: `main.py` converts float32 → int16 → WAV file saved to `~/Desktop/YYYY-MM-DD_HHMMSS_recording.wav` (transcription skipped)
+**Record-Only Mode (CLI `--record-only` / GUI "録音だけする")**:
+1. Configuration → recording → WAV save (steps 1–3 above)
+2. Transcription is skipped
 
-**File Mode (`--file` argument)**:
-1. **Configuration Phase**: `main.py` → `config.py` (load/interactive setup) → `config.json`
-2. **Validation Phase**: `main.py` checks file existence and validates it's a file
-3. **Transcription Phase**: `main.py` → `transcriber.py` (faster-whisper) → text string (supports WAV, MP3, M4A, etc.)
-4. **Save Phase**: `main.py` → `obsidian.py` → `{vault_path}/{save_folder}/YYYY-MM-DD_HHMMSS_raw.md`
+**File Mode (CLI `--file` / GUI "文字起こしだけする")**:
+1. **Configuration Phase**: entry → `pipeline.load_or_configure` → `config.json`
+2. **Validation Phase**: entry checks file existence and validates it's a file
+3. **Transcribe + Note Save Phase**: entry → `pipeline.transcribe_and_save` → ... → `{save_folder}/YYYY-MM-DD_HHMMSS_raw.md` (supports WAV, MP3, M4A, etc.)
 
 ### Important Implementation Details
 
@@ -97,6 +101,6 @@ Dependencies are managed in `pyproject.toml`. Use `uv sync` to install dependenc
 
 ### When changing output format:
 
-- Output filename pattern is in obsidian.py (`{timestamp}_raw.md`)
-- Frontmatter structure matches Obsidian conventions (YAML between --- delimiters)
+- Output filename pattern is in note_writer.py (`{timestamp}_raw.md`)
+- Frontmatter structure matches Obsidian conventions (YAML between --- delimiters) — other Markdown note tools (Logseq, Bear, etc.) will also parse it
 - The `_raw` suffix indicates untouched transcription (vs potential summarized versions)

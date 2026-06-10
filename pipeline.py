@@ -17,7 +17,7 @@ from scipy.io import wavfile
 
 from config import configure_interactive, load_config, save_config
 from formatter import format_transcription
-from obsidian import save_to_obsidian
+from note_writer import save_transcript
 from recorder import SAMPLE_RATE
 from transcriber import transcribe_audio, transcribe_audio_openai
 
@@ -75,7 +75,7 @@ def transcribe_and_save(
     config: dict,
     progress_callback: Callable[[str], None] | None = None,
 ) -> Path:
-    """音声ファイルを文字起こし → 整形 → Obsidian 保存し、保存先パスを返す。
+    """音声ファイルを文字起こし → 整形 → ノート保存し、保存先パスを返す。
 
     Args:
         audio_file: 文字起こし対象の音声ファイル。
@@ -85,7 +85,7 @@ def transcribe_and_save(
             GUI なら UI キュー経由、CLI なら Rich Progress 経由で消費する。
 
     Returns:
-        Obsidian に保存された Markdown ファイルパス。
+        保存された Markdown ファイルパス。
 
     Raises:
         RuntimeError: 文字起こし・整形・保存のいずれかが失敗した場合。
@@ -113,4 +113,4 @@ def transcribe_and_save(
         transcription = format_transcription(transcription, config)
 
     save_folder = Path(config["save_folder"])
-    return save_to_obsidian(save_folder, transcription, format_mode)
+    return save_transcript(save_folder, transcription, format_mode)
