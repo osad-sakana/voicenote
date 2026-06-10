@@ -8,9 +8,6 @@ import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
-
-load_dotenv()
-
 from rich.console import Console
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
@@ -42,11 +39,16 @@ def _run_transcription(audio_file: Path, config: dict) -> Path:
 
 
 def main():
+    load_dotenv()
     parser = argparse.ArgumentParser(description="録音・文字起こしツール")
     parser.add_argument("--config", action="store_true", help="設定を再入力する")
     parser.add_argument("--file", type=str, help="既存の音声ファイルを文字起こしする")
-    parser.add_argument("--record-only", action="store_true", help="録音のみ（文字起こしをスキップ）")
-    parser.add_argument("--list-devices", action="store_true", help="利用可能なオーディオデバイス一覧を表示")
+    parser.add_argument(
+        "--record-only", action="store_true", help="録音のみ（文字起こしをスキップ）"
+    )
+    parser.add_argument(
+        "--list-devices", action="store_true", help="利用可能なオーディオデバイス一覧を表示"
+    )
     parser.add_argument("--device", type=str, help="録音に使用するデバイス（名前またはID）")
     args = parser.parse_args()
 
@@ -73,11 +75,13 @@ def main():
         except Exception as e:
             console.print(f"[red]{e}[/red]")
             sys.exit(1)
-        console.print(Panel.fit(
-            f"[bold green]完了![/bold green]\n\n"
-            f"[bold]文字起こし結果:[/bold]\n{saved_path.absolute()}",
-            border_style="green",
-        ))
+        console.print(
+            Panel.fit(
+                f"[bold green]完了![/bold green]\n\n"
+                f"[bold]文字起こし結果:[/bold]\n{saved_path.absolute()}",
+                border_style="green",
+            )
+        )
         return
 
     try:
@@ -91,11 +95,13 @@ def main():
     console.print(f"[green]✓ 保存完了: {audio_file.name}[/green]")
 
     if args.record_only:
-        console.print(Panel.fit(
-            f"[bold green]録音完了![/bold green]\n\n"
-            f"[bold]保存先:[/bold]\n{audio_file.absolute()}",
-            border_style="green",
-        ))
+        console.print(
+            Panel.fit(
+                f"[bold green]録音完了![/bold green]\n\n"
+                f"[bold]保存先:[/bold]\n{audio_file.absolute()}",
+                border_style="green",
+            )
+        )
         return
 
     try:
@@ -104,12 +110,14 @@ def main():
         console.print(f"[red]{e}[/red]")
         sys.exit(1)
 
-    console.print(Panel.fit(
-        f"[bold green]完了![/bold green]\n\n"
-        f"[bold]音声ファイル:[/bold]\n{audio_file.absolute()}\n\n"
-        f"[bold]文字起こし結果:[/bold]\n{saved_path.absolute()}",
-        border_style="green",
-    ))
+    console.print(
+        Panel.fit(
+            f"[bold green]完了![/bold green]\n\n"
+            f"[bold]音声ファイル:[/bold]\n{audio_file.absolute()}\n\n"
+            f"[bold]文字起こし結果:[/bold]\n{saved_path.absolute()}",
+            border_style="green",
+        )
+    )
 
 
 if __name__ == "__main__":

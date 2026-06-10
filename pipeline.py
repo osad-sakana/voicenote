@@ -7,9 +7,9 @@ GUI/CLI 共通の業務ロジックモジュール。
 
 import os
 import sys
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Optional
 
 import numpy as np
 from rich.console import Console
@@ -73,7 +73,7 @@ def save_wav(audio_data: np.ndarray, dest_dir: Path) -> Path:
 def transcribe_and_save(
     audio_file: Path,
     config: dict,
-    progress_callback: Optional[Callable[[str], None]] = None,
+    progress_callback: Callable[[str], None] | None = None,
 ) -> Path:
     """音声ファイルを文字起こし → 整形 → Obsidian 保存し、保存先パスを返す。
 
@@ -91,6 +91,7 @@ def transcribe_and_save(
         RuntimeError: 文字起こし・整形・保存のいずれかが失敗した場合。
         KeyError: `save_folder` が config に無い場合。
     """
+
     def notify(msg: str):
         if progress_callback:
             progress_callback(msg)

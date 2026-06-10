@@ -14,12 +14,17 @@ class TestLoadConfig:
 
     def test_loads_existing_config(self, tmp_path: Path):
         path = tmp_path / "config.json"
-        path.write_text(json.dumps({
-            "save_folder": "/tmp/notes",
-            "transcription_mode": "local",
-            "vad_filter": True,
-            "format_mode": "rule",
-        }), encoding="utf-8")
+        path.write_text(
+            json.dumps(
+                {
+                    "save_folder": "/tmp/notes",
+                    "transcription_mode": "local",
+                    "vad_filter": True,
+                    "format_mode": "rule",
+                }
+            ),
+            encoding="utf-8",
+        )
 
         config = load_config(path)
         assert config is not None

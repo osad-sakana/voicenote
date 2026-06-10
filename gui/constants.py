@@ -10,13 +10,7 @@ MODES = [MODE_RECORD_TRANSCRIBE, MODE_RECORD_ONLY, MODE_TRANSCRIBE_ONLY]
 PRIMARY_BUTTON_COLOR = ["#3B8ED0", "#1F6AA5"]
 
 _EMOJI_RE = re.compile(
-    "["
-    "\U0001F000-\U0001FFFF"
-    "⌀-⟿"
-    "⤀-⯿"
-    "​-‏"
-    "︀-️"
-    "]+",
+    "[\U0001f000-\U0001ffff⌀-⟿⤀-⯿​-‏︀-️]+",
     flags=re.UNICODE,
 )
 

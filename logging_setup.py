@@ -18,9 +18,7 @@ def setup_logging() -> Path:
     log_file = _LOG_DIR / f"{datetime.now().strftime('%Y-%m-%d_%H%M%S')}.log"
 
     file_handler = logging.FileHandler(log_file, encoding="utf-8")
-    file_handler.setFormatter(
-        logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
-    )
+    file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
 
     logging.getLogger().setLevel(logging.WARNING)
     logger = logging.getLogger("voicenote")

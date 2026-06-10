@@ -5,7 +5,6 @@
 
 import os
 import re
-from typing import Optional
 
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
@@ -75,7 +74,6 @@ def _apply_llm_format(text: str, api_key: str) -> str:
     Returns:
         整形後のテキスト。エラー時は入力テキストをそのまま返す。
     """
-    from openai import OpenAI
 
     system_prompt = (
         "あなたは音声文字起こしのテキスト整形の専門家です。\n"
@@ -119,7 +117,9 @@ def _format_chunk_with_llm(text: str, api_key: str, system_prompt: str) -> str:
         result = response.choices[0].message.content
         return result.strip() if result else text
     except Exception as e:
-        console.print(f"[yellow]⚠ LLM整形でエラーが発生しました（ルールベース結果を使用）: {e}[/yellow]")
+        console.print(
+            f"[yellow]⚠ LLM整形でエラーが発生しました（ルールベース結果を使用）: {e}[/yellow]"
+        )
         return text
 
 
@@ -154,7 +154,9 @@ def format_transcription(text: str, config: dict) -> str:
     if format_mode == "llm":
         api_key = _resolve_api_key(config)
         if not api_key:
-            console.print("[yellow]⚠ OPENAI_API_KEYが設定されていません。ルールベース整形を使用します。[/yellow]")
+            console.print(
+                "[yellow]⚠ OPENAI_API_KEYが設定されていません。ルールベース整形を使用します。[/yellow]"
+            )
             return _apply_rule_based_format(text)
 
         with Progress(
@@ -173,6 +175,6 @@ def format_transcription(text: str, config: dict) -> str:
     return text
 
 
-def _resolve_api_key(config: dict) -> Optional[str]:
+def _resolve_api_key(config: dict) -> str | None:
     """環境変数または設定からOpenAI APIキーを取得する。"""
     return os.environ.get("OPENAI_API_KEY") or config.get("openai_api_key")

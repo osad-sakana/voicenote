@@ -1,5 +1,6 @@
 """VoiceNote GUI のメインウィンドウ。"""
 
+import contextlib
 import logging
 import os
 import threading
@@ -61,8 +62,12 @@ class App(ctk.CTk):
     def _build_ui(self):
         header = ctk.CTkFrame(self, fg_color="transparent")
         header.pack(fill="x", padx=20, pady=(12, 4))
-        ctk.CTkLabel(header, text="VoiceNote", font=ctk.CTkFont(size=16, weight="bold")).pack(side="left")
-        self._settings_btn = ctk.CTkButton(header, text="設定", width=80, fg_color="gray", command=self._open_settings)
+        ctk.CTkLabel(header, text="VoiceNote", font=ctk.CTkFont(size=16, weight="bold")).pack(
+            side="left"
+        )
+        self._settings_btn = ctk.CTkButton(
+            header, text="設定", width=80, fg_color="gray", command=self._open_settings
+        )
         self._settings_btn.pack(side="right")
 
         ctk.CTkLabel(self, text="モード", anchor="w").pack(fill="x", padx=20, pady=(8, 2))
@@ -81,7 +86,9 @@ class App(ctk.CTk):
         self._device_section = ctk.CTkFrame(self._panel, fg_color="transparent")
         ctk.CTkLabel(self._device_section, text="入力デバイス", anchor="w").pack(fill="x")
         self._device_var = ctk.StringVar()
-        self._device_menu = ctk.CTkOptionMenu(self._device_section, variable=self._device_var, values=["（読み込み中）"])
+        self._device_menu = ctk.CTkOptionMenu(
+            self._device_section, variable=self._device_var, values=["（読み込み中）"]
+        )
         self._device_menu.pack(fill="x", pady=2)
 
         self._rec_dest_section = ctk.CTkFrame(self._panel, fg_color="transparent")
@@ -91,7 +98,9 @@ class App(ctk.CTk):
         self._rec_dest_entry = ctk.CTkEntry(rec_dest_row)
         self._rec_dest_entry.insert(0, str(Path.home() / "Desktop"))
         self._rec_dest_entry.pack(side="left", fill="x", expand=True)
-        ctk.CTkButton(rec_dest_row, text="...", width=36, command=self._browse_rec_dest).pack(side="left", padx=(4, 0))
+        ctk.CTkButton(rec_dest_row, text="...", width=36, command=self._browse_rec_dest).pack(
+            side="left", padx=(4, 0)
+        )
 
         self._file_section = ctk.CTkFrame(self._panel, fg_color="transparent")
         ctk.CTkLabel(self._file_section, text="音声ファイル", anchor="w").pack(fill="x")
@@ -99,10 +108,15 @@ class App(ctk.CTk):
         file_row.pack(fill="x", pady=2)
         self._file_entry = ctk.CTkEntry(file_row, placeholder_text="ファイルを選択してください")
         self._file_entry.pack(side="left", fill="x", expand=True)
-        ctk.CTkButton(file_row, text="...", width=36, command=self._browse_audio_file).pack(side="left", padx=(4, 0))
+        ctk.CTkButton(file_row, text="...", width=36, command=self._browse_audio_file).pack(
+            side="left", padx=(4, 0)
+        )
 
         self._exec_btn = ctk.CTkButton(
-            self, text="実行", height=44, font=ctk.CTkFont(size=15),
+            self,
+            text="実行",
+            height=44,
+            font=ctk.CTkFont(size=15),
             command=self._on_exec,
         )
         self._exec_btn.pack(fill="x", padx=20, pady=8)
@@ -121,11 +135,7 @@ class App(ctk.CTk):
         for section in (self._device_section, self._rec_dest_section, self._file_section):
             section.pack_forget()
 
-        if mode == MODE_RECORD_TRANSCRIBE:
-            self._device_section.pack(fill="x", pady=(0, 8))
-            self._rec_dest_section.pack(fill="x")
-            self._exec_btn.configure(text="実行")
-        elif mode == MODE_RECORD_ONLY:
+        if mode in (MODE_RECORD_TRANSCRIBE, MODE_RECORD_ONLY):
             self._device_section.pack(fill="x", pady=(0, 8))
             self._rec_dest_section.pack(fill="x")
             self._exec_btn.configure(text="実行")
@@ -215,7 +225,9 @@ class App(ctk.CTk):
     def _start_recording(self):
         mode = self._mode_var.get()
         if mode == MODE_RECORD_TRANSCRIBE and not self._config.get("save_folder"):
-            messagebox.showwarning("設定が必要", "先に 設定から文字起こし保存フォルダを設定してください")
+            messagebox.showwarning(
+                "設定が必要", "先に 設定から文字起こし保存フォルダを設定してください"
+            )
             return
 
         device_id = self._selected_device_id()
@@ -255,7 +267,9 @@ class App(ctk.CTk):
         mode = self._mode_var.get()
         self._set_processing(True)
         self._exec_btn.configure(text="文字起こし中...")
-        threading.Thread(target=self._process_audio, args=(audio_data, rec_dest, mode), daemon=True).start()
+        threading.Thread(
+            target=self._process_audio, args=(audio_data, rec_dest, mode), daemon=True
+        ).start()
 
     def _timer_loop(self):
         while self._recording:
@@ -285,7 +299,9 @@ class App(ctk.CTk):
             self._run_transcription(audio_file)
         except Exception:
             _logger.error("_process_audio で未捕捉の例外:\n%s", traceback.format_exc())
-            self._ui_queue.submit(self._log, f"予期せぬエラーが発生しました（ログを確認: {self._log_file.name}）")
+            self._ui_queue.submit(
+                self._log, f"予期せぬエラーが発生しました（ログを確認: {self._log_file.name}）"
+            )
             self._ui_queue.submit(self._reset_ui)
 
     def _run_transcribe_only(self):
@@ -294,11 +310,15 @@ class App(ctk.CTk):
             messagebox.showwarning("ファイル未選択", "音声ファイルを選択してください")
             return
         if not self._config.get("save_folder"):
-            messagebox.showwarning("設定が必要", "先に 設定から文字起こし保存フォルダを設定してください")
+            messagebox.showwarning(
+                "設定が必要", "先に 設定から文字起こし保存フォルダを設定してください"
+            )
             return
         self._set_processing(True)
         self._exec_btn.configure(text="文字起こし中...")
-        threading.Thread(target=self._run_transcription, args=(Path(audio_path),), daemon=True).start()
+        threading.Thread(
+            target=self._run_transcription, args=(Path(audio_path),), daemon=True
+        ).start()
 
     def _run_transcription(self, audio_file: Path):
         _logger.debug("_run_transcription 開始: %s", audio_file)
@@ -312,7 +332,9 @@ class App(ctk.CTk):
             self._ui_queue.submit(self._log, msg)
 
         try:
-            saved_path = transcribe_and_save(audio_file, self._config, progress_callback=on_progress)
+            saved_path = transcribe_and_save(
+                audio_file, self._config, progress_callback=on_progress
+            )
         except Exception as e:
             _logger.error("transcribe_and_save エラー:\n%s", traceback.format_exc())
             self._ui_queue.submit(self._log, f"文字起こしエラー: {e}")
@@ -329,10 +351,8 @@ class App(ctk.CTk):
         self._alive = False
         self._recording = False
         if self._recorder is not None:
-            try:
+            with contextlib.suppress(Exception):
                 self._recorder.stop()
-            except Exception:
-                pass
         self.destroy()
 
     # ──────────────── ユーティリティ ────────────────

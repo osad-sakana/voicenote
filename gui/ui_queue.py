@@ -8,7 +8,7 @@ macOS では `Tk.after` を非メインスレッドから呼ぶと SIGBUS で落
 """
 
 import queue
-from typing import Callable
+from collections.abc import Callable
 
 
 class ThreadSafeUIQueue:

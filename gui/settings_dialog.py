@@ -25,19 +25,35 @@ class SettingsDialog(ctk.CTkToplevel):
     def _build_ui(self):
         pad = {"padx": 20, "pady": 6}
 
-        ctk.CTkLabel(self, text="文字起こし保存フォルダ（絶対パス）", anchor="w").pack(fill="x", **pad)
+        ctk.CTkLabel(self, text="文字起こし保存フォルダ（絶対パス）", anchor="w").pack(
+            fill="x", **pad
+        )
         folder_frame = ctk.CTkFrame(self, fg_color="transparent")
         folder_frame.pack(fill="x", padx=20, pady=2)
         self._folder_entry = ctk.CTkEntry(folder_frame)
         self._folder_entry.pack(side="left", fill="x", expand=True)
-        ctk.CTkButton(folder_frame, text="...", width=36, command=self._browse_folder).pack(side="left", padx=(4, 0))
+        ctk.CTkButton(folder_frame, text="...", width=36, command=self._browse_folder).pack(
+            side="left", padx=(4, 0)
+        )
 
         ctk.CTkLabel(self, text="文字起こしモード", anchor="w").pack(fill="x", **pad)
         self._mode_var = ctk.StringVar(value="local")
         mode_frame = ctk.CTkFrame(self, fg_color="transparent")
         mode_frame.pack(fill="x", padx=20, pady=2)
-        ctk.CTkRadioButton(mode_frame, text="ローカル (faster-whisper)", variable=self._mode_var, value="local", command=self._on_mode_change).pack(side="left", padx=(0, 16))
-        ctk.CTkRadioButton(mode_frame, text="OpenAI API", variable=self._mode_var, value="openai", command=self._on_mode_change).pack(side="left")
+        ctk.CTkRadioButton(
+            mode_frame,
+            text="ローカル (faster-whisper)",
+            variable=self._mode_var,
+            value="local",
+            command=self._on_mode_change,
+        ).pack(side="left", padx=(0, 16))
+        ctk.CTkRadioButton(
+            mode_frame,
+            text="OpenAI API",
+            variable=self._mode_var,
+            value="openai",
+            command=self._on_mode_change,
+        ).pack(side="left")
 
         self._model_label = ctk.CTkLabel(self, text="Whisperモデル", anchor="w")
         self._model_label.pack(fill="x", **pad)
@@ -56,7 +72,9 @@ class SettingsDialog(ctk.CTkToplevel):
 
         btn_frame = ctk.CTkFrame(self, fg_color="transparent")
         btn_frame.pack(fill="x", padx=20, pady=16)
-        ctk.CTkButton(btn_frame, text="キャンセル", fg_color="gray", command=self.destroy).pack(side="left", expand=True, padx=(0, 8))
+        ctk.CTkButton(btn_frame, text="キャンセル", fg_color="gray", command=self.destroy).pack(
+            side="left", expand=True, padx=(0, 8)
+        )
         ctk.CTkButton(btn_frame, text="保存", command=self._save).pack(side="left", expand=True)
 
     def _load_values(self):
@@ -86,7 +104,9 @@ class SettingsDialog(ctk.CTkToplevel):
             return
         folder_path = Path(save_folder).expanduser()
         if not folder_path.parent.exists():
-            messagebox.showerror("エラー", f"親ディレクトリが存在しません:\n{folder_path.parent}", parent=self)
+            messagebox.showerror(
+                "エラー", f"親ディレクトリが存在しません:\n{folder_path.parent}", parent=self
+            )
             return
         config: dict = {
             "save_folder": str(folder_path),

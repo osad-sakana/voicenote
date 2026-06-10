@@ -5,7 +5,6 @@ sounddeviceを使用したリアルタイム録音
 
 import signal
 import threading
-from typing import Callable, Optional
 
 import numpy as np
 import sounddevice as sd
@@ -43,7 +42,7 @@ def print_devices():
     console.print(f"\n[dim]デフォルト入力: {default_input['name']}[/dim]")
 
 
-def resolve_device_id(device: Optional[str]) -> Optional[int]:
+def resolve_device_id(device: str | None) -> int | None:
     """デバイス名またはIDを数値IDに解決する。見つからない場合はValueErrorを送出。"""
     if device is None:
         return None
@@ -62,11 +61,11 @@ class ThreadedRecorder:
     start() で録音開始、stop() で停止、get_data() でnumpy配列を取得。
     """
 
-    def __init__(self, device_id: Optional[int] = None):
+    def __init__(self, device_id: int | None = None):
         self._device_id = device_id
         self._data: list[np.ndarray] = []
         self._lock = threading.Lock()
-        self._stream: Optional[sd.InputStream] = None
+        self._stream: sd.InputStream | None = None
         self._running = False
 
     def _callback(self, indata, frames, time, status):
@@ -100,7 +99,7 @@ class ThreadedRecorder:
             return np.concatenate(self._data, axis=0).flatten()
 
 
-def record_audio(device: Optional[str] = None) -> np.ndarray:
+def record_audio(device: str | None = None) -> np.ndarray:
     """
     音声を録音する（CLI用・Ctrl+Cで停止）
 
@@ -126,12 +125,14 @@ def record_audio(device: Optional[str] = None) -> np.ndarray:
     signal.signal(signal.SIGINT, _signal_handler)
 
     device_name = sd.query_devices(device_id)["name"] if device_id is not None else "デフォルト"
-    console.print(Panel.fit(
-        f"[bold green]録音を開始します[/bold green]\n"
-        f"[dim]デバイス: {device_name}[/dim]\n"
-        f"[yellow]Ctrl+C[/yellow] で録音を終了します",
-        border_style="green",
-    ))
+    console.print(
+        Panel.fit(
+            f"[bold green]録音を開始します[/bold green]\n"
+            f"[dim]デバイス: {device_name}[/dim]\n"
+            f"[yellow]Ctrl+C[/yellow] で録音を終了します",
+            border_style="green",
+        )
+    )
 
     recorder.start()
     stop_event.wait()

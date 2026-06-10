@@ -5,9 +5,7 @@
 
 import json
 import os
-import sys
 from pathlib import Path
-from typing import Optional
 
 from rich.console import Console
 from rich.panel import Panel
@@ -16,12 +14,12 @@ from rich.prompt import Prompt
 console = Console()
 
 
-def load_config(config_path: Path) -> Optional[dict]:
+def load_config(config_path: Path) -> dict | None:
     """設定ファイルを読み込む。存在しない場合はNoneを返す。"""
     if not config_path.exists():
         return None
     try:
-        with open(config_path, "r", encoding="utf-8") as f:
+        with open(config_path, encoding="utf-8") as f:
             config = json.load(f)
         return _migrate(config)
     except Exception as e:
@@ -61,14 +59,18 @@ def _migrate(config: dict) -> dict:
 
 def configure_interactive() -> dict:
     """対話的に設定を入力する（CLI用）"""
-    console.print(Panel.fit(
-        "[bold cyan]初回設定[/bold cyan]\n設定項目を入力してください。",
-        border_style="cyan",
-    ))
+    console.print(
+        Panel.fit(
+            "[bold cyan]初回設定[/bold cyan]\n設定項目を入力してください。",
+            border_style="cyan",
+        )
+    )
 
     # 保存先フォルダ（絶対パス）
     while True:
-        save_folder = Prompt.ask("[bold]保存先フォルダの絶対パス[/bold]（例: /Users/xxx/Obsidian/recordings）")
+        save_folder = Prompt.ask(
+            "[bold]保存先フォルダの絶対パス[/bold]（例: /Users/xxx/Obsidian/recordings）"
+        )
         save_folder_path = Path(save_folder).expanduser().resolve()
         if save_folder_path.parent.exists():
             console.print(f"[green]✓ 保存先フォルダ: {save_folder_path}[/green]")
@@ -136,7 +138,9 @@ def configure_interactive() -> dict:
     vad_filter = True
     if transcription_mode == "local":
         console.print("\n[bold]VAD（音声区間検出）フィルタを有効にしますか？[/bold]")
-        console.print("  有効にすると無音・ノイズ区間を除去し、ループ（Hallucination）を抑制します。")
+        console.print(
+            "  有効にすると無音・ノイズ区間を除去し、ループ（Hallucination）を抑制します。"
+        )
         vad_choice = Prompt.ask("[bold]VADフィルタ[/bold]", choices=["y", "n"], default="y")
         vad_filter = vad_choice == "y"
         console.print(f"[green]✓ VADフィルタ: {'有効' if vad_filter else '無効'}[/green]")
@@ -156,6 +160,7 @@ def configure_interactive() -> dict:
             break
         elif fmt_choice == "2":
             import os as _os
+
             api_key_available = _os.environ.get("OPENAI_API_KEY") or openai_api_key
             if not api_key_available:
                 console.print(
