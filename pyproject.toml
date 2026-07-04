@@ -3,6 +3,7 @@ name = "voicenote"
 version = "0.1.0"
 description = "Local voice recording and transcription tool with Markdown note output"
 readme = "README.md"
+license = "MIT"
 requires-python = ">=3.10,<3.14"
 dependencies = [
     "faster-whisper",
