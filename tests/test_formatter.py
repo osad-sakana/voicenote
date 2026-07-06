@@ -5,6 +5,7 @@ LLM 整形 (`_apply_llm_format`) は外部 API 呼び出しのためスコープ
 分岐 (none/rule) のみをテストする。
 """
 
+from config import VoiceNoteConfig
 from formatter import _apply_rule_based_format, format_transcription
 
 
@@ -63,20 +64,23 @@ class TestApplyRuleBasedFormat:
 class TestFormatTranscription:
     def test_returns_text_unchanged_when_mode_none(self):
         text = "えーと これは整形されない。"
-        assert format_transcription(text, {"format_mode": "none"}) == text
+        assert format_transcription(text, VoiceNoteConfig(format_mode="none")) == text
 
     def test_returns_empty_for_empty_input(self):
-        assert format_transcription("", {"format_mode": "rule"}) == ""
+        assert format_transcription("", VoiceNoteConfig(format_mode="rule")) == ""
 
     def test_rule_mode_applies_rule_based_format(self):
-        result = format_transcription("えーと 一文目です。二文目です。", {"format_mode": "rule"})
+        result = format_transcription(
+            "えーと 一文目です。二文目です。", VoiceNoteConfig(format_mode="rule")
+        )
         assert "えーと" not in result
         assert "一文目です。\n" in result
 
     def test_unknown_mode_returns_input_unchanged(self):
         text = "そのまま"
-        assert format_transcription(text, {"format_mode": "unknown"}) == text
+        assert format_transcription(text, VoiceNoteConfig(format_mode="unknown")) == text
 
-    def test_default_mode_is_none(self):
-        text = "えーと 整形されないはず"
-        assert format_transcription(text, {}) == text
+    def test_default_mode_is_rule(self):
+        text = "えーと 整形されるはず"
+        result = format_transcription(text, VoiceNoteConfig())
+        assert "えーと" not in result

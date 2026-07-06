@@ -5,6 +5,7 @@
 
 import json
 import os
+from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 
 from rich.console import Console
@@ -13,51 +14,74 @@ from rich.prompt import Prompt
 
 console = Console()
 
+CONFIG_PATH = Path.home() / ".config" / "voicenote" / "config.json"
 
-def load_config(config_path: Path) -> dict | None:
+
+@dataclass(frozen=True)
+class VoiceNoteConfig:
+    """アプリケーション設定。全フィールドのデフォルト値をここに集約する。"""
+
+    save_folder: str = ""
+    whisper_model: str = "small"
+    transcription_mode: str = "local"
+    vad_filter: bool = True
+    format_mode: str = "rule"
+    openai_api_key: str | None = None
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "VoiceNoteConfig":
+        """dict から生成する。旧フォーマット（vault_path）のマイグレーションも行う。"""
+        migrated = _migrate_legacy(data)
+        known_keys = {f.name for f in fields(cls)}
+        return cls(**{k: v for k, v in migrated.items() if k in known_keys})
+
+    def to_dict(self) -> dict:
+        """JSON保存用の dict に変換する。未設定の openai_api_key は含めない。"""
+        data = asdict(self)
+        if not data.get("openai_api_key"):
+            del data["openai_api_key"]
+        return data
+
+
+def _migrate_legacy(config: dict) -> dict:
+    """旧フォーマット（vault_path + save_folder）を新フォーマットに変換する。"""
+    if "vault_path" in config and "save_folder" in config:
+        vault_path = config["vault_path"]
+        old_save_folder = config["save_folder"]
+        config = {k: v for k, v in config.items() if k != "vault_path"}
+        # 既に絶対パスなら変換不要
+        if not Path(old_save_folder).is_absolute():
+            config = {
+                **config,
+                "save_folder": str(Path(vault_path) / old_save_folder),
+            }
+    return config
+
+
+def load_config(config_path: Path) -> VoiceNoteConfig | None:
     """設定ファイルを読み込む。存在しない場合はNoneを返す。"""
     if not config_path.exists():
         return None
     try:
         with open(config_path, encoding="utf-8") as f:
-            config = json.load(f)
-        return _migrate(config)
+            data = json.load(f)
+        return VoiceNoteConfig.from_dict(data)
     except Exception as e:
         console.print(f"[red]設定ファイルの読み込みエラー: {e}[/red]")
         return None
 
 
-def save_config(config_path: Path, config: dict):
+def save_config(config_path: Path, config: VoiceNoteConfig):
     """設定ファイルを保存する。失敗した場合はRuntimeErrorを送出。"""
     try:
         config_path.parent.mkdir(parents=True, exist_ok=True)
         with open(config_path, "w", encoding="utf-8") as f:
-            json.dump(config, f, ensure_ascii=False, indent=2)
+            json.dump(config.to_dict(), f, ensure_ascii=False, indent=2)
     except Exception as e:
         raise RuntimeError(f"設定ファイルの保存エラー: {e}") from e
 
 
-def _migrate(config: dict) -> dict:
-    """旧フォーマット（vault_path + save_folder）を新フォーマットに変換する。"""
-    if "vault_path" in config and "save_folder" in config:
-        old_save_folder = config["save_folder"]
-        # 既に絶対パスなら変換不要
-        if not Path(old_save_folder).is_absolute():
-            config = {
-                **config,
-                "save_folder": str(Path(config["vault_path"]) / old_save_folder),
-            }
-        del config["vault_path"]
-    if "transcription_mode" not in config:
-        config = {**config, "transcription_mode": "local"}
-    if "vad_filter" not in config:
-        config = {**config, "vad_filter": True}
-    if "format_mode" not in config:
-        config = {**config, "format_mode": "rule"}
-    return config
-
-
-def configure_interactive() -> dict:
+def configure_interactive() -> VoiceNoteConfig:
     """対話的に設定を入力する（CLI用）"""
     console.print(
         Panel.fit(
@@ -178,14 +202,11 @@ def configure_interactive() -> dict:
         else:
             console.print("[red]✗ 1・2・3のいずれかを入力してください。[/red]")
 
-    config: dict = {
-        "save_folder": str(save_folder_path),
-        "whisper_model": whisper_model,
-        "transcription_mode": transcription_mode,
-        "vad_filter": vad_filter,
-        "format_mode": format_mode,
-    }
-    if openai_api_key:
-        config["openai_api_key"] = openai_api_key
-
-    return config
+    return VoiceNoteConfig(
+        save_folder=str(save_folder_path),
+        whisper_model=whisper_model,
+        transcription_mode=transcription_mode,
+        vad_filter=vad_filter,
+        format_mode=format_mode,
+        openai_api_key=openai_api_key,
+    )

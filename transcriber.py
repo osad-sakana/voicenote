@@ -12,6 +12,8 @@ import numpy as np
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
+from config import VoiceNoteConfig
+
 console = Console()
 
 PAUSE_THRESHOLD = 2.0
@@ -193,10 +195,8 @@ def transcribe_audio_openai(
         raise RuntimeError(f"OpenAI APIエラー: {e}") from e
 
 
-def transcribe_with_cli_progress(audio_path: Path, config: dict) -> str:
+def transcribe_with_cli_progress(audio_path: Path, config: VoiceNoteConfig) -> str:
     """CLI用: richプログレス表示つきで文字起こしを実行する"""
-    mode = config.get("transcription_mode", "local")
-
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -207,14 +207,14 @@ def transcribe_with_cli_progress(audio_path: Path, config: dict) -> str:
         def on_progress(msg: str):
             progress.update(task, description=msg)
 
-        if mode == "openai":
+        if config.transcription_mode == "openai":
             result = transcribe_audio_openai(audio_path, progress_callback=on_progress)
         else:
             result = transcribe_audio(
                 audio_path,
-                config["whisper_model"],
+                config.whisper_model,
                 progress_callback=on_progress,
-                vad_filter=config.get("vad_filter", True),
+                vad_filter=config.vad_filter,
             )
 
         progress.update(task, completed=True)

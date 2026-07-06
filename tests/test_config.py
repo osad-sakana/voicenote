@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from config import _migrate, load_config, save_config
+from config import VoiceNoteConfig, load_config, save_config
 
 
 class TestLoadConfig:
@@ -28,8 +28,8 @@ class TestLoadConfig:
 
         config = load_config(path)
         assert config is not None
-        assert config["save_folder"] == "/tmp/notes"
-        assert config["transcription_mode"] == "local"
+        assert config.save_folder == "/tmp/notes"
+        assert config.transcription_mode == "local"
 
     def test_returns_none_for_invalid_json(self, tmp_path: Path):
         path = tmp_path / "broken.json"
@@ -40,14 +40,14 @@ class TestLoadConfig:
 class TestSaveConfig:
     def test_creates_parent_directories(self, tmp_path: Path):
         path = tmp_path / "nested" / "dir" / "config.json"
-        save_config(path, {"save_folder": "/tmp/x"})
+        save_config(path, VoiceNoteConfig(save_folder="/tmp/x"))
         assert path.exists()
         loaded = json.loads(path.read_text(encoding="utf-8"))
         assert loaded["save_folder"] == "/tmp/x"
 
     def test_writes_unicode_without_escaping(self, tmp_path: Path):
         path = tmp_path / "config.json"
-        save_config(path, {"save_folder": "/tmp/メモ"})
+        save_config(path, VoiceNoteConfig(save_folder="/tmp/メモ"))
         raw = path.read_text(encoding="utf-8")
         assert "メモ" in raw
 
@@ -56,39 +56,71 @@ class TestSaveConfig:
         blocker = tmp_path / "blocker"
         blocker.write_text("")
         with pytest.raises(RuntimeError):
-            save_config(blocker / "child" / "config.json", {})
+            save_config(blocker / "child" / "config.json", VoiceNoteConfig())
 
 
-class TestMigrate:
+class TestVoiceNoteConfigDefaults:
+    def test_default_values(self):
+        config = VoiceNoteConfig()
+        assert config.save_folder == ""
+        assert config.whisper_model == "small"
+        assert config.transcription_mode == "local"
+        assert config.vad_filter is True
+        assert config.format_mode == "rule"
+        assert config.openai_api_key is None
+
+
+class TestToDict:
+    def test_omits_none_api_key(self):
+        config = VoiceNoteConfig(save_folder="/tmp")
+        assert "openai_api_key" not in config.to_dict()
+
+    def test_includes_api_key_when_set(self):
+        config = VoiceNoteConfig(save_folder="/tmp", openai_api_key="sk-xxx")
+        assert config.to_dict()["openai_api_key"] == "sk-xxx"
+
+    def test_roundtrip(self):
+        config = VoiceNoteConfig(
+            save_folder="/tmp",
+            whisper_model="large-v3",
+            transcription_mode="openai",
+            vad_filter=False,
+            format_mode="llm",
+            openai_api_key="sk-xxx",
+        )
+        assert VoiceNoteConfig.from_dict(config.to_dict()) == config
+
+
+class TestFromDict:
     def test_legacy_vault_path_relative_save_folder_is_combined(self):
-        config = {
-            "vault_path": "/Users/x/Obsidian",
-            "save_folder": "recordings",
-        }
-        migrated = _migrate(config)
-        assert "vault_path" not in migrated
-        assert migrated["save_folder"] == "/Users/x/Obsidian/recordings"
+        config = VoiceNoteConfig.from_dict(
+            {
+                "vault_path": "/Users/x/Obsidian",
+                "save_folder": "recordings",
+            }
+        )
+        assert config.save_folder == "/Users/x/Obsidian/recordings"
 
     def test_legacy_vault_path_absolute_save_folder_kept_as_is(self):
-        config = {
-            "vault_path": "/Users/x/Obsidian",
-            "save_folder": "/absolute/path",
-        }
-        migrated = _migrate(config)
-        assert "vault_path" not in migrated
-        assert migrated["save_folder"] == "/absolute/path"
+        config = VoiceNoteConfig.from_dict(
+            {
+                "vault_path": "/Users/x/Obsidian",
+                "save_folder": "/absolute/path",
+            }
+        )
+        assert config.save_folder == "/absolute/path"
 
-    def test_adds_default_transcription_mode(self):
-        migrated = _migrate({"save_folder": "/tmp"})
-        assert migrated["transcription_mode"] == "local"
+    def test_uses_default_transcription_mode_when_missing(self):
+        config = VoiceNoteConfig.from_dict({"save_folder": "/tmp"})
+        assert config.transcription_mode == "local"
 
-    def test_adds_default_vad_filter(self):
-        migrated = _migrate({"save_folder": "/tmp"})
-        assert migrated["vad_filter"] is True
+    def test_uses_default_vad_filter_when_missing(self):
+        config = VoiceNoteConfig.from_dict({"save_folder": "/tmp"})
+        assert config.vad_filter is True
 
-    def test_adds_default_format_mode(self):
-        migrated = _migrate({"save_folder": "/tmp"})
-        assert migrated["format_mode"] == "rule"
+    def test_uses_default_format_mode_when_missing(self):
+        config = VoiceNoteConfig.from_dict({"save_folder": "/tmp"})
+        assert config.format_mode == "rule"
 
     def test_preserves_existing_values(self):
         original = {
@@ -97,13 +129,23 @@ class TestMigrate:
             "vad_filter": False,
             "format_mode": "llm",
         }
-        migrated = _migrate(original)
-        assert migrated["transcription_mode"] == "openai"
-        assert migrated["vad_filter"] is False
-        assert migrated["format_mode"] == "llm"
+        config = VoiceNoteConfig.from_dict(original)
+        assert config.transcription_mode == "openai"
+        assert config.vad_filter is False
+        assert config.format_mode == "llm"
 
     def test_does_not_mutate_input(self):
         original = {"save_folder": "/tmp"}
         snapshot = dict(original)
-        _migrate(original)
+        VoiceNoteConfig.from_dict(original)
         assert original == snapshot
+
+    def test_does_not_mutate_input_with_legacy_absolute_save_folder(self):
+        original = {"vault_path": "/v", "save_folder": "/absolute"}
+        snapshot = dict(original)
+        VoiceNoteConfig.from_dict(original)
+        assert original == snapshot
+
+    def test_ignores_unknown_keys(self):
+        config = VoiceNoteConfig.from_dict({"save_folder": "/tmp", "unknown_key": "x"})
+        assert config.save_folder == "/tmp"

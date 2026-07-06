@@ -1,15 +1,18 @@
 """設定ダイアログ。保存フォルダ・文字起こしモード・モデル・APIキーを編集する。"""
 
+from dataclasses import replace
 from pathlib import Path
 from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
 
+from config import VoiceNoteConfig
+
 
 class SettingsDialog(ctk.CTkToplevel):
     """設定ダイアログ"""
 
-    def __init__(self, parent, config: dict):
+    def __init__(self, parent, config: VoiceNoteConfig):
         super().__init__(parent)
         self.title("設定")
         self.geometry("480x380")
@@ -17,7 +20,7 @@ class SettingsDialog(ctk.CTkToplevel):
         self.grab_set()
 
         self._config = config
-        self._result: dict | None = None
+        self._result: VoiceNoteConfig | None = None
 
         self._build_ui()
         self._load_values()
@@ -78,10 +81,10 @@ class SettingsDialog(ctk.CTkToplevel):
         ctk.CTkButton(btn_frame, text="保存", command=self._save).pack(side="left", expand=True)
 
     def _load_values(self):
-        self._folder_entry.insert(0, self._config.get("save_folder", ""))
-        self._mode_var.set(self._config.get("transcription_mode", "local"))
-        self._model_var.set(self._config.get("whisper_model", "small"))
-        self._apikey_entry.insert(0, self._config.get("openai_api_key", ""))
+        self._folder_entry.insert(0, self._config.save_folder)
+        self._mode_var.set(self._config.transcription_mode)
+        self._model_var.set(self._config.whisper_model)
+        self._apikey_entry.insert(0, self._config.openai_api_key or "")
         self._on_mode_change()
 
     def _on_mode_change(self):
@@ -108,16 +111,15 @@ class SettingsDialog(ctk.CTkToplevel):
                 "エラー", f"親ディレクトリが存在しません:\n{folder_path.parent}", parent=self
             )
             return
-        config: dict = {
-            "save_folder": str(folder_path),
-            "whisper_model": self._model_var.get(),
-            "transcription_mode": self._mode_var.get(),
-        }
         api_key = self._apikey_entry.get().strip()
-        if api_key:
-            config["openai_api_key"] = api_key
-        self._result = config
+        self._result = replace(
+            self._config,
+            save_folder=str(folder_path),
+            whisper_model=self._model_var.get(),
+            transcription_mode=self._mode_var.get(),
+            openai_api_key=api_key or None,
+        )
         self.destroy()
 
-    def get_result(self) -> dict | None:
+    def get_result(self) -> VoiceNoteConfig | None:
         return self._result
