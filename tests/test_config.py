@@ -140,6 +140,12 @@ class TestFromDict:
         VoiceNoteConfig.from_dict(original)
         assert original == snapshot
 
+    def test_does_not_mutate_input_with_legacy_absolute_save_folder(self):
+        original = {"vault_path": "/v", "save_folder": "/absolute"}
+        snapshot = dict(original)
+        VoiceNoteConfig.from_dict(original)
+        assert original == snapshot
+
     def test_ignores_unknown_keys(self):
         config = VoiceNoteConfig.from_dict({"save_folder": "/tmp", "unknown_key": "x"})
         assert config.save_folder == "/tmp"

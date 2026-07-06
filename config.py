@@ -46,14 +46,15 @@ class VoiceNoteConfig:
 def _migrate_legacy(config: dict) -> dict:
     """旧フォーマット（vault_path + save_folder）を新フォーマットに変換する。"""
     if "vault_path" in config and "save_folder" in config:
+        vault_path = config["vault_path"]
         old_save_folder = config["save_folder"]
+        config = {k: v for k, v in config.items() if k != "vault_path"}
         # 既に絶対パスなら変換不要
         if not Path(old_save_folder).is_absolute():
             config = {
                 **config,
-                "save_folder": str(Path(config["vault_path"]) / old_save_folder),
+                "save_folder": str(Path(vault_path) / old_save_folder),
             }
-        del config["vault_path"]
     return config
 
 
