@@ -12,6 +12,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
+from config import VoiceNoteConfig
 from logging_setup import setup_logging
 from pipeline import load_or_configure, save_wav, transcribe_and_save
 from recorder import print_devices, record_audio
@@ -19,7 +20,7 @@ from recorder import print_devices, record_audio
 console = Console()
 
 
-def _run_transcription(audio_file: Path, config: dict) -> Path:
+def _run_transcription(audio_file: Path, config: VoiceNoteConfig) -> Path:
     """Rich Progress を駆動しつつ pipeline.transcribe_and_save を実行する。"""
     with Progress(
         SpinnerColumn(),

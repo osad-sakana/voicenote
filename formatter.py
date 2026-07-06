@@ -9,6 +9,8 @@ import re
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
+from config import VoiceNoteConfig
+
 console = Console()
 
 # 日本語フィラー語パターン（単独出現かつ文脈に依存しない語）
@@ -123,18 +125,18 @@ def _format_chunk_with_llm(text: str, api_key: str, system_prompt: str) -> str:
         return text
 
 
-def format_transcription(text: str, config: dict) -> str:
+def format_transcription(text: str, config: VoiceNoteConfig) -> str:
     """
     設定に基づいて文字起こしテキストを整形する。
 
     Args:
         text: 整形対象のテキスト
-        config: 設定辞書（format_mode キーを参照）
+        config: 設定（format_mode を参照）
 
     Returns:
         整形後のテキスト
     """
-    format_mode = config.get("format_mode", "none")
+    format_mode = config.format_mode
 
     if format_mode == "none" or not text:
         return text
@@ -175,6 +177,6 @@ def format_transcription(text: str, config: dict) -> str:
     return text
 
 
-def _resolve_api_key(config: dict) -> str | None:
+def _resolve_api_key(config: VoiceNoteConfig) -> str | None:
     """環境変数または設定からOpenAI APIキーを取得する。"""
-    return os.environ.get("OPENAI_API_KEY") or config.get("openai_api_key")
+    return os.environ.get("OPENAI_API_KEY") or config.openai_api_key

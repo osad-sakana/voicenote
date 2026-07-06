@@ -12,8 +12,8 @@ from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
 
-from config import load_config, save_config
-from pipeline import CONFIG_PATH, save_wav, transcribe_and_save
+from config import CONFIG_PATH, VoiceNoteConfig, load_config, save_config
+from pipeline import save_wav, transcribe_and_save
 from recorder import ThreadedRecorder, list_devices
 
 from .constants import (
@@ -43,7 +43,7 @@ class App(ctk.CTk):
         self.resizable(False, False)
 
         self._log_file = log_file
-        self._config: dict = {}
+        self._config: VoiceNoteConfig = VoiceNoteConfig()
         self._recorder: ThreadedRecorder | None = None
         self._recording = False
         self._elapsed = 0
@@ -149,8 +149,8 @@ class App(ctk.CTk):
         config = load_config(CONFIG_PATH)
         if config:
             self._config = config
-            if not os.environ.get("OPENAI_API_KEY") and config.get("openai_api_key"):
-                os.environ["OPENAI_API_KEY"] = config["openai_api_key"]
+            if not os.environ.get("OPENAI_API_KEY") and config.openai_api_key:
+                os.environ["OPENAI_API_KEY"] = config.openai_api_key
             self._log("設定を読み込みました")
         else:
             self._log("設定が見つかりません。設定から保存フォルダを設定してください")
@@ -165,8 +165,8 @@ class App(ctk.CTk):
         try:
             save_config(CONFIG_PATH, result)
             self._config = result
-            if not os.environ.get("OPENAI_API_KEY") and result.get("openai_api_key"):
-                os.environ["OPENAI_API_KEY"] = result["openai_api_key"]
+            if not os.environ.get("OPENAI_API_KEY") and result.openai_api_key:
+                os.environ["OPENAI_API_KEY"] = result.openai_api_key
             self._log("設定を保存しました")
         except RuntimeError as e:
             messagebox.showerror("エラー", str(e))
@@ -224,7 +224,7 @@ class App(ctk.CTk):
 
     def _start_recording(self):
         mode = self._mode_var.get()
-        if mode == MODE_RECORD_TRANSCRIBE and not self._config.get("save_folder"):
+        if mode == MODE_RECORD_TRANSCRIBE and not self._config.save_folder:
             messagebox.showwarning(
                 "設定が必要", "先に 設定から文字起こし保存フォルダを設定してください"
             )
@@ -309,7 +309,7 @@ class App(ctk.CTk):
         if not audio_path:
             messagebox.showwarning("ファイル未選択", "音声ファイルを選択してください")
             return
-        if not self._config.get("save_folder"):
+        if not self._config.save_folder:
             messagebox.showwarning(
                 "設定が必要", "先に 設定から文字起こし保存フォルダを設定してください"
             )
