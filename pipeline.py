@@ -19,7 +19,7 @@ from config import CONFIG_PATH, VoiceNoteConfig, configure_interactive, load_con
 from formatter import format_transcription
 from note_writer import save_transcript
 from recorder import SAMPLE_RATE
-from transcriber import transcribe_audio, transcribe_audio_openai
+from transcriber import transcribe
 
 console = Console()
 
@@ -95,15 +95,7 @@ def transcribe_and_save(
         if progress_callback:
             progress_callback(msg)
 
-    if config.transcription_mode == "openai":
-        transcription = transcribe_audio_openai(audio_file, progress_callback=progress_callback)
-    else:
-        transcription = transcribe_audio(
-            audio_file,
-            config.whisper_model,
-            progress_callback=progress_callback,
-            vad_filter=config.vad_filter,
-        )
+    transcription = transcribe(audio_file, config, progress_callback=progress_callback)
 
     if config.format_mode != "none":
         notify("テキスト整形中...")
