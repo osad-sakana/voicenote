@@ -9,12 +9,8 @@ from collections.abc import Callable
 from pathlib import Path
 
 import numpy as np
-from rich.console import Console
-from rich.progress import Progress, SpinnerColumn, TextColumn
 
 from config import VoiceNoteConfig
-
-console = Console()
 
 PAUSE_THRESHOLD = 2.0
 TARGET_SAMPLE_RATE = 16000
@@ -195,29 +191,17 @@ def transcribe_audio_openai(
         raise RuntimeError(f"OpenAI APIエラー: {e}") from e
 
 
-def transcribe_with_cli_progress(audio_path: Path, config: VoiceNoteConfig) -> str:
-    """CLI用: richプログレス表示つきで文字起こしを実行する"""
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        console=console,
-    ) as progress:
-        task = progress.add_task("準備中...", total=None)
-
-        def on_progress(msg: str):
-            progress.update(task, description=msg)
-
-        if config.transcription_mode == "openai":
-            result = transcribe_audio_openai(audio_path, progress_callback=on_progress)
-        else:
-            result = transcribe_audio(
-                audio_path,
-                config.whisper_model,
-                progress_callback=on_progress,
-                vad_filter=config.vad_filter,
-            )
-
-        progress.update(task, completed=True)
-
-    console.print("[green]✓ 文字起こし完了[/green]")
-    return result
+def transcribe(
+    audio_path: Path,
+    config: VoiceNoteConfig,
+    progress_callback: Callable[[str], None] | None = None,
+) -> str:
+    """設定の transcription_mode に応じて local/openai の文字起こしをディスパッチする"""
+    if config.transcription_mode == "openai":
+        return transcribe_audio_openai(audio_path, progress_callback=progress_callback)
+    return transcribe_audio(
+        audio_path,
+        config.whisper_model,
+        progress_callback=progress_callback,
+        vad_filter=config.vad_filter,
+    )
