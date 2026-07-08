@@ -12,7 +12,7 @@ from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
 
-from config import CONFIG_PATH, VoiceNoteConfig, load_config, save_config
+from config import CONFIG_PATH, InvalidConfigError, VoiceNoteConfig, load_config, save_config
 from pipeline import save_wav, transcribe_and_save
 from recorder import ThreadedRecorder, list_devices
 
@@ -146,7 +146,11 @@ class App(ctk.CTk):
     # ──────────────── 設定 ────────────────
 
     def _load_config(self):
-        config = load_config(CONFIG_PATH)
+        try:
+            config = load_config(CONFIG_PATH)
+        except InvalidConfigError as e:
+            self._log(f"設定の読み込みに失敗しました: {e}")
+            config = None
         if config:
             self._config = config
             if not os.environ.get("OPENAI_API_KEY") and config.openai_api_key:

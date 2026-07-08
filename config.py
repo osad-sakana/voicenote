@@ -17,6 +17,10 @@ console = Console()
 CONFIG_PATH = Path.home() / ".config" / "voicenote" / "config.json"
 
 
+class InvalidConfigError(Exception):
+    """設定ファイルが存在するが読み込み・パースに失敗した場合に送出する。"""
+
+
 @dataclass(frozen=True)
 class VoiceNoteConfig:
     """アプリケーション設定。全フィールドのデフォルト値をここに集約する。"""
@@ -59,7 +63,11 @@ def _migrate_legacy(config: dict) -> dict:
 
 
 def load_config(config_path: Path) -> VoiceNoteConfig | None:
-    """設定ファイルを読み込む。存在しない場合はNoneを返す。"""
+    """設定ファイルを読み込む。存在しない場合はNoneを返す。
+
+    Raises:
+        InvalidConfigError: ファイルは存在するが読み込み・パースに失敗した場合。
+    """
     if not config_path.exists():
         return None
     try:
@@ -67,8 +75,7 @@ def load_config(config_path: Path) -> VoiceNoteConfig | None:
             data = json.load(f)
         return VoiceNoteConfig.from_dict(data)
     except Exception as e:
-        console.print(f"[red]設定ファイルの読み込みエラー: {e}[/red]")
-        return None
+        raise InvalidConfigError(f"設定ファイルの読み込みエラー: {e}") from e
 
 
 def save_config(config_path: Path, config: VoiceNoteConfig):

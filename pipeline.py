@@ -6,13 +6,11 @@ GUI/CLI 共通の業務ロジックモジュール。
 """
 
 import os
-import sys
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
 import numpy as np
-from rich.console import Console
 from scipy.io import wavfile
 
 from config import CONFIG_PATH, VoiceNoteConfig, configure_interactive, load_config, save_config
@@ -20,8 +18,6 @@ from formatter import format_transcription
 from note_writer import save_transcript
 from recorder import SAMPLE_RATE
 from transcriber import transcribe
-
-console = Console()
 
 
 def load_or_configure(
@@ -36,17 +32,16 @@ def load_or_configure(
 
     Returns:
         設定。GUI で interactive_fallback=False かつ設定無しなら `VoiceNoteConfig()`。
+
+    Raises:
+        InvalidConfigError: 設定ファイルが破損している場合。
+        RuntimeError: 対話的設定後の保存に失敗した場合。
     """
     config = None if force_config else load_config(CONFIG_PATH)
 
     if config is None and interactive_fallback:
         config = configure_interactive()
-        try:
-            save_config(CONFIG_PATH, config)
-            console.print(f"[green]設定を保存しました: {CONFIG_PATH}[/green]")
-        except RuntimeError as e:
-            console.print(f"[red]{e}[/red]")
-            sys.exit(1)
+        save_config(CONFIG_PATH, config)
     elif config is None:
         config = VoiceNoteConfig()
 
@@ -91,15 +86,12 @@ def transcribe_and_save(
         RuntimeError: 文字起こし・整形・保存のいずれかが失敗した場合。
     """
 
-    def notify(msg: str):
-        if progress_callback:
-            progress_callback(msg)
-
     transcription = transcribe(audio_file, config, progress_callback=progress_callback)
 
     if config.format_mode != "none":
-        notify("テキスト整形中...")
-        transcription = format_transcription(transcription, config)
+        transcription = format_transcription(
+            transcription, config, progress_callback=progress_callback
+        )
 
     save_folder = Path(config.save_folder)
     return save_transcript(save_folder, transcription, config.format_mode)

@@ -5,14 +5,10 @@ sounddeviceを使用したリアルタイム録音
 
 import signal
 import threading
+from collections.abc import Callable
 
 import numpy as np
 import sounddevice as sd
-from rich.console import Console
-from rich.panel import Panel
-from rich.table import Table
-
-console = Console()
 
 SAMPLE_RATE = 16000
 
@@ -27,19 +23,9 @@ def list_devices() -> list[dict]:
     ]
 
 
-def print_devices():
-    """利用可能なオーディオデバイス一覧を表示（CLI用）"""
-    table = Table(title="利用可能なオーディオデバイス")
-    table.add_column("ID", style="cyan", justify="right")
-    table.add_column("デバイス名", style="green")
-    table.add_column("入力Ch", justify="right")
-
-    for d in list_devices():
-        table.add_row(str(d["id"]), d["name"], str(d["input_channels"]))
-
-    console.print(table)
-    default_input = sd.query_devices(kind="input")
-    console.print(f"\n[dim]デフォルト入力: {default_input['name']}[/dim]")
+def default_input_name() -> str:
+    """デフォルト入力デバイス名を返す"""
+    return sd.query_devices(kind="input")["name"]
 
 
 def resolve_device_id(device: str | None) -> int | None:
@@ -99,12 +85,18 @@ class ThreadedRecorder:
             return np.concatenate(self._data, axis=0).flatten()
 
 
-def record_audio(device: str | None = None) -> np.ndarray:
+def record_audio(
+    device: str | None = None,
+    on_start: Callable[[str], None] | None = None,
+    on_stop: Callable[[], None] | None = None,
+) -> np.ndarray:
     """
     音声を録音する（CLI用・Ctrl+Cで停止）
 
     Args:
         device: 入力デバイス名またはID（Noneの場合はデフォルト）
+        on_start: 録音開始時に解決済みデバイス名を受け取るコールバック
+        on_stop: Ctrl+C受信（録音停止処理開始）時に呼ばれるコールバック
 
     Returns:
         録音された音声データ（float32のnumpy配列）
@@ -119,24 +111,18 @@ def record_audio(device: str | None = None) -> np.ndarray:
     stop_event = threading.Event()
 
     def _signal_handler(sig, frame):
-        console.print("\n[yellow]録音を停止しています...[/yellow]")
+        if on_stop:
+            on_stop()
         stop_event.set()
 
     signal.signal(signal.SIGINT, _signal_handler)
 
     device_name = sd.query_devices(device_id)["name"] if device_id is not None else "デフォルト"
-    console.print(
-        Panel.fit(
-            f"[bold green]録音を開始します[/bold green]\n"
-            f"[dim]デバイス: {device_name}[/dim]\n"
-            f"[yellow]Ctrl+C[/yellow] で録音を終了します",
-            border_style="green",
-        )
-    )
+    if on_start:
+        on_start(device_name)
 
     recorder.start()
     stop_event.wait()
     recorder.stop()
 
-    console.print("[green]✓ 録音完了[/green]")
     return recorder.get_data()
