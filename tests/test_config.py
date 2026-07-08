@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from config import VoiceNoteConfig, load_config, save_config
+from config import InvalidConfigError, VoiceNoteConfig, load_config, save_config
 
 
 class TestLoadConfig:
@@ -31,10 +31,11 @@ class TestLoadConfig:
         assert config.save_folder == "/tmp/notes"
         assert config.transcription_mode == "local"
 
-    def test_returns_none_for_invalid_json(self, tmp_path: Path):
+    def test_raises_invalid_config_error_for_invalid_json(self, tmp_path: Path):
         path = tmp_path / "broken.json"
         path.write_text("{ not valid json", encoding="utf-8")
-        assert load_config(path) is None
+        with pytest.raises(InvalidConfigError):
+            load_config(path)
 
 
 class TestSaveConfig:

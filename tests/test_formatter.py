@@ -84,3 +84,28 @@ class TestFormatTranscription:
         text = "えーと 整形されるはず"
         result = format_transcription(text, VoiceNoteConfig())
         assert "えーと" not in result
+
+    def test_rule_mode_reports_progress_via_callback(self):
+        messages: list[str] = []
+        format_transcription(
+            "一文目です。",
+            VoiceNoteConfig(format_mode="rule"),
+            progress_callback=messages.append,
+        )
+        assert any("整形中" in m for m in messages)
+        assert any("完了" in m for m in messages)
+
+    def test_none_mode_does_not_call_progress_callback(self):
+        messages: list[str] = []
+        format_transcription(
+            "そのまま",
+            VoiceNoteConfig(format_mode="none"),
+            progress_callback=messages.append,
+        )
+        assert messages == []
+
+    def test_progress_callback_is_optional(self):
+        result = format_transcription(
+            "えーと 整形されるはず", VoiceNoteConfig(format_mode="rule")
+        )
+        assert "えーと" not in result

@@ -11,13 +11,28 @@ from dotenv import load_dotenv
 from rich.console import Console
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
+from rich.table import Table
 
-from config import VoiceNoteConfig
+from config import InvalidConfigError, VoiceNoteConfig
 from logging_setup import setup_logging
 from pipeline import load_or_configure, save_wav, transcribe_and_save
-from recorder import print_devices, record_audio
+from recorder import default_input_name, list_devices, record_audio
 
 console = Console()
+
+
+def print_devices():
+    """利用可能なオーディオデバイス一覧を表示"""
+    table = Table(title="利用可能なオーディオデバイス")
+    table.add_column("ID", style="cyan", justify="right")
+    table.add_column("デバイス名", style="green")
+    table.add_column("入力Ch", justify="right")
+
+    for d in list_devices():
+        table.add_row(str(d["id"]), d["name"], str(d["input_channels"]))
+
+    console.print(table)
+    console.print(f"\n[dim]デフォルト入力: {default_input_name()}[/dim]")
 
 
 def _run_transcription(audio_file: Path, config: VoiceNoteConfig) -> Path:
@@ -62,7 +77,11 @@ def main():
         sys.exit(1)
 
     setup_logging()
-    config = load_or_configure(force_config=args.config)
+    try:
+        config = load_or_configure(force_config=args.config)
+    except (InvalidConfigError, RuntimeError) as e:
+        console.print(f"[red]{e}[/red]")
+        sys.exit(1)
     desktop = Path.home() / "Desktop"
 
     if args.file:
@@ -85,11 +104,26 @@ def main():
         )
         return
 
+    def on_start(device_name: str):
+        console.print(
+            Panel.fit(
+                f"[bold green]録音を開始します[/bold green]\n"
+                f"[dim]デバイス: {device_name}[/dim]\n"
+                f"[yellow]Ctrl+C[/yellow] で録音を終了します",
+                border_style="green",
+            )
+        )
+
+    def on_stop():
+        console.print("\n[yellow]録音を停止しています...[/yellow]")
+
     try:
-        audio_data = record_audio(device=args.device)
+        audio_data = record_audio(device=args.device, on_start=on_start, on_stop=on_stop)
     except (ValueError, RuntimeError) as e:
         console.print(f"[red]エラー: {e}[/red]")
         sys.exit(1)
+
+    console.print("[green]✓ 録音完了[/green]")
 
     console.print("\n[cyan]Desktopに音声データを保存中...[/cyan]")
     audio_file = save_wav(audio_data, desktop)

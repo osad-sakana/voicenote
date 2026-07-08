@@ -5,13 +5,9 @@
 
 import os
 import re
-
-from rich.console import Console
-from rich.progress import Progress, SpinnerColumn, TextColumn
+from collections.abc import Callable
 
 from config import VoiceNoteConfig
-
-console = Console()
 
 # 日本語フィラー語パターン（単独出現かつ文脈に依存しない語）
 _FILLER_PATTERNS = [
@@ -65,13 +61,18 @@ def _apply_rule_based_format(text: str) -> str:
     return result.strip()
 
 
-def _apply_llm_format(text: str, api_key: str) -> str:
+def _apply_llm_format(
+    text: str,
+    api_key: str,
+    progress_callback: Callable[[str], None] | None = None,
+) -> str:
     """
     OpenAI GPT-4o-miniで文字起こしテキストを整形する。
 
     Args:
         text: 整形対象のテキスト（ルールベース整形済みを想定）
         api_key: OpenAI APIキー
+        progress_callback: 進捗メッセージを受け取るコールバック
 
     Returns:
         整形後のテキスト。エラー時は入力テキストをそのまま返す。
@@ -95,13 +96,20 @@ def _apply_llm_format(text: str, api_key: str) -> str:
         formatted_parts = []
         for para in paragraphs:
             if para.strip():
-                formatted_parts.append(_format_chunk_with_llm(para, api_key, system_prompt))
+                formatted_parts.append(
+                    _format_chunk_with_llm(para, api_key, system_prompt, progress_callback)
+                )
         return "\n\n".join(formatted_parts)
 
-    return _format_chunk_with_llm(text, api_key, system_prompt)
+    return _format_chunk_with_llm(text, api_key, system_prompt, progress_callback)
 
 
-def _format_chunk_with_llm(text: str, api_key: str, system_prompt: str) -> str:
+def _format_chunk_with_llm(
+    text: str,
+    api_key: str,
+    system_prompt: str,
+    progress_callback: Callable[[str], None] | None = None,
+) -> str:
     """1チャンクをLLMで整形する。エラー時は元テキストを返す。"""
     try:
         from openai import OpenAI
@@ -119,59 +127,54 @@ def _format_chunk_with_llm(text: str, api_key: str, system_prompt: str) -> str:
         result = response.choices[0].message.content
         return result.strip() if result else text
     except Exception as e:
-        console.print(
-            f"[yellow]⚠ LLM整形でエラーが発生しました（ルールベース結果を使用）: {e}[/yellow]"
-        )
+        if progress_callback:
+            progress_callback(f"⚠ LLM整形でエラーが発生しました（ルールベース結果を使用）: {e}")
         return text
 
 
-def format_transcription(text: str, config: VoiceNoteConfig) -> str:
+def format_transcription(
+    text: str,
+    config: VoiceNoteConfig,
+    progress_callback: Callable[[str], None] | None = None,
+) -> str:
     """
     設定に基づいて文字起こしテキストを整形する。
 
     Args:
         text: 整形対象のテキスト
         config: 設定（format_mode を参照）
+        progress_callback: 進捗メッセージを受け取るコールバック
 
     Returns:
         整形後のテキスト
     """
+
+    def notify(msg: str):
+        if progress_callback:
+            progress_callback(msg)
+
     format_mode = config.format_mode
 
     if format_mode == "none" or not text:
         return text
 
     if format_mode == "rule":
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            console=console,
-            transient=True,
-        ) as progress:
-            progress.add_task("テキストを整形中...", total=None)
-            result = _apply_rule_based_format(text)
-        console.print("[green]✓ テキスト整形完了（ルールベース）[/green]")
+        notify("テキストを整形中...")
+        result = _apply_rule_based_format(text)
+        notify("✓ テキスト整形完了（ルールベース）")
         return result
 
     if format_mode == "llm":
         api_key = _resolve_api_key(config)
         if not api_key:
-            console.print(
-                "[yellow]⚠ OPENAI_API_KEYが設定されていません。ルールベース整形を使用します。[/yellow]"
-            )
+            notify("⚠ OPENAI_API_KEYが設定されていません。ルールベース整形を使用します。")
             return _apply_rule_based_format(text)
 
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            console=console,
-            transient=True,
-        ) as progress:
-            progress.add_task("LLMでテキストを整形中...", total=None)
-            # ルールベースで前処理してからLLMに渡す（トークン節約）
-            preprocessed = _apply_rule_based_format(text)
-            result = _apply_llm_format(preprocessed, api_key)
-        console.print("[green]✓ テキスト整形完了（LLM）[/green]")
+        notify("LLMでテキストを整形中...")
+        # ルールベースで前処理してからLLMに渡す（トークン節約）
+        preprocessed = _apply_rule_based_format(text)
+        result = _apply_llm_format(preprocessed, api_key, progress_callback)
+        notify("✓ テキスト整形完了（LLM）")
         return result
 
     return text
