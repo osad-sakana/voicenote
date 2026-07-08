@@ -45,6 +45,10 @@ def _run_transcription(audio_file: Path, config: VoiceNoteConfig) -> Path:
         task = progress.add_task("準備中...", total=None)
 
         def on_progress(msg: str):
+            if msg.startswith("⚠"):
+                # 警告はスピナーの説明文だと次のメッセージで上書きされ見落とされるため、
+                # スクロールバックに残る形でも表示する
+                progress.console.print(f"[yellow]{msg}[/yellow]")
             progress.update(task, description=msg)
 
         saved_path = transcribe_and_save(audio_file, config, progress_callback=on_progress)
