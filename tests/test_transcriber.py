@@ -6,8 +6,16 @@
 
 from pathlib import Path
 
+import pytest
+
 from config import VoiceNoteConfig
-from transcriber import transcribe
+from transcriber import transcribe, transcribe_audio_openai
+
+
+class TestTranscribeAudioOpenai:
+    def test_raises_value_error_when_api_key_missing(self):
+        with pytest.raises(ValueError, match="OpenAI APIキー"):
+            transcribe_audio_openai(Path("/tmp/audio.wav"), None)
 
 
 class TestTranscribe:
@@ -18,7 +26,7 @@ class TestTranscribe:
             calls["args"] = (audio_path, model_name, progress_callback, vad_filter)
             return "local result"
 
-        def fake_transcribe_audio_openai(audio_path, progress_callback=None):
+        def fake_transcribe_audio_openai(audio_path, api_key, progress_callback=None):
             raise AssertionError("openai 版は呼ばれてはいけない")
 
         monkeypatch.setattr("transcriber.transcribe_audio", fake_transcribe_audio)

@@ -195,7 +195,7 @@ def configure_interactive() -> VoiceNoteConfig:
             console.print("[green]✓ ルールベース整形を選択しました[/green]")
             break
         elif fmt_choice == "2":
-            api_key_available = os.environ.get("OPENAI_API_KEY") or openai_api_key
+            api_key_available = resolve_api_key(VoiceNoteConfig(openai_api_key=openai_api_key))
             if not api_key_available:
                 console.print(
                     "[yellow]⚠ OPENAI_API_KEYが設定されていません。ルールベース整形を使用します。[/yellow]"
