@@ -39,19 +39,20 @@ class TestTranscribe:
         def fake_transcribe_audio(audio_path, model_name, progress_callback=None, vad_filter=True):
             raise AssertionError("local 版は呼ばれてはいけない")
 
-        def fake_transcribe_audio_openai(audio_path, progress_callback=None):
-            calls["args"] = (audio_path, progress_callback)
+        def fake_transcribe_audio_openai(audio_path, api_key, progress_callback=None):
+            calls["args"] = (audio_path, api_key, progress_callback)
             return "openai result"
 
         monkeypatch.setattr("transcriber.transcribe_audio", fake_transcribe_audio)
         monkeypatch.setattr("transcriber.transcribe_audio_openai", fake_transcribe_audio_openai)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
-        config = VoiceNoteConfig(transcription_mode="openai")
+        config = VoiceNoteConfig(transcription_mode="openai", openai_api_key="sk-test")
         audio_path = Path("/tmp/audio.wav")
         result = transcribe(audio_path, config)
 
         assert result == "openai result"
-        assert calls["args"] == (audio_path, None)
+        assert calls["args"] == (audio_path, "sk-test", None)
 
     def test_progress_callback_is_passed_through(self, monkeypatch):
         received = {}

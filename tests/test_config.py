@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from config import InvalidConfigError, VoiceNoteConfig, load_config, save_config
+from config import InvalidConfigError, VoiceNoteConfig, load_config, resolve_api_key, save_config
 
 
 class TestLoadConfig:
@@ -150,3 +150,20 @@ class TestFromDict:
     def test_ignores_unknown_keys(self):
         config = VoiceNoteConfig.from_dict({"save_folder": "/tmp", "unknown_key": "x"})
         assert config.save_folder == "/tmp"
+
+
+class TestResolveApiKey:
+    def test_prefers_env_over_config(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-env")
+        config = VoiceNoteConfig(openai_api_key="sk-cfg")
+        assert resolve_api_key(config) == "sk-env"
+
+    def test_falls_back_to_config_when_env_missing(self, monkeypatch):
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        config = VoiceNoteConfig(openai_api_key="sk-cfg")
+        assert resolve_api_key(config) == "sk-cfg"
+
+    def test_returns_none_when_neither_set(self, monkeypatch):
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        config = VoiceNoteConfig()
+        assert resolve_api_key(config) is None

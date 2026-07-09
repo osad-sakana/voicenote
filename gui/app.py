@@ -2,7 +2,6 @@
 
 import contextlib
 import logging
-import os
 import threading
 import time
 import traceback
@@ -153,8 +152,6 @@ class App(ctk.CTk):
             config = None
         if config:
             self._config = config
-            if not os.environ.get("OPENAI_API_KEY") and config.openai_api_key:
-                os.environ["OPENAI_API_KEY"] = config.openai_api_key
             self._log("設定を読み込みました")
         else:
             self._log("設定が見つかりません。設定から保存フォルダを設定してください")
@@ -169,8 +166,6 @@ class App(ctk.CTk):
         try:
             save_config(CONFIG_PATH, result)
             self._config = result
-            if not os.environ.get("OPENAI_API_KEY") and result.openai_api_key:
-                os.environ["OPENAI_API_KEY"] = result.openai_api_key
             self._log("設定を保存しました")
         except RuntimeError as e:
             messagebox.showerror("エラー", str(e))

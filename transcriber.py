@@ -3,14 +3,13 @@
 faster-whisperを使用したローカル文字起こし、またはOpenAI APIを使用したクラウド文字起こし
 """
 
-import os
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
 
 import numpy as np
 
-from config import VoiceNoteConfig
+from config import VoiceNoteConfig, resolve_api_key
 
 PAUSE_THRESHOLD = 2.0
 TARGET_SAMPLE_RATE = 16000
@@ -139,6 +138,7 @@ def transcribe_audio(
 
 def transcribe_audio_openai(
     audio_path: Path,
+    api_key: str | None,
     progress_callback: Callable[[str], None] | None = None,
 ) -> str:
     """
@@ -146,6 +146,7 @@ def transcribe_audio_openai(
 
     Args:
         audio_path: 音声ファイルのパス
+        api_key: OpenAI APIキー
         progress_callback: 進捗メッセージを受け取るコールバック（GUIから渡す）
 
     Returns:
@@ -157,9 +158,8 @@ def transcribe_audio_openai(
     """
     from openai import OpenAI
 
-    api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
-        raise ValueError("OPENAI_API_KEY環境変数が設定されていません")
+        raise ValueError("OpenAI APIキーが設定されていません")
 
     file_size_mb = audio_path.stat().st_size / (1024 * 1024)
     if file_size_mb > 25:
@@ -198,7 +198,8 @@ def transcribe(
 ) -> str:
     """設定の transcription_mode に応じて local/openai の文字起こしをディスパッチする"""
     if config.transcription_mode == "openai":
-        return transcribe_audio_openai(audio_path, progress_callback=progress_callback)
+        api_key = resolve_api_key(config)
+        return transcribe_audio_openai(audio_path, api_key, progress_callback=progress_callback)
     return transcribe_audio(
         audio_path,
         config.whisper_model,
