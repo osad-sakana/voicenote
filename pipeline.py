@@ -5,7 +5,6 @@ GUI/CLI 共通の業務ロジックモジュール。
 エントリーポイント (`main.py` / `main_cli.py`) からは UI に集中できるようにする。
 """
 
-import os
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
@@ -44,9 +43,6 @@ def load_or_configure(
         save_config(CONFIG_PATH, config)
     elif config is None:
         config = VoiceNoteConfig()
-
-    if not os.environ.get("OPENAI_API_KEY") and config.openai_api_key:
-        os.environ["OPENAI_API_KEY"] = config.openai_api_key
 
     return config
 

@@ -109,3 +109,26 @@ class TestFormatTranscription:
             "えーと 整形されるはず", VoiceNoteConfig(format_mode="rule")
         )
         assert "えーと" not in result
+
+
+class TestFormatTranscriptionLlmMode:
+    def test_llm_mode_resolves_api_key_from_config(self, monkeypatch):
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        received = {}
+
+        def fake_apply_llm_format(text, api_key, progress_callback=None):
+            received["api_key"] = api_key
+            return text
+
+        monkeypatch.setattr("formatter._apply_llm_format", fake_apply_llm_format)
+
+        config = VoiceNoteConfig(format_mode="llm", openai_api_key="sk-cfg")
+        format_transcription("一文目です。", config)
+
+        assert received["api_key"] == "sk-cfg"
+
+    def test_llm_mode_falls_back_to_rule_based_when_no_key(self, monkeypatch):
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        config = VoiceNoteConfig(format_mode="llm", openai_api_key=None)
+        result = format_transcription("えーと 一文目です。", config)
+        assert "えーと" not in result

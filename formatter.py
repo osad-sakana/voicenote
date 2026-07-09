@@ -3,11 +3,10 @@
 ルールベース整形とLLM（GPT-4o-mini）による整形を提供する
 """
 
-import os
 import re
 from collections.abc import Callable
 
-from config import VoiceNoteConfig
+from config import VoiceNoteConfig, resolve_api_key
 
 # 日本語フィラー語パターン（単独出現かつ文脈に依存しない語）
 _FILLER_PATTERNS = [
@@ -165,7 +164,7 @@ def format_transcription(
         return result
 
     if format_mode == "llm":
-        api_key = _resolve_api_key(config)
+        api_key = resolve_api_key(config)
         if not api_key:
             notify("⚠ OPENAI_API_KEYが設定されていません。ルールベース整形を使用します。")
             return _apply_rule_based_format(text)
@@ -178,8 +177,3 @@ def format_transcription(
         return result
 
     return text
-
-
-def _resolve_api_key(config: VoiceNoteConfig) -> str | None:
-    """環境変数または設定からOpenAI APIキーを取得する。"""
-    return os.environ.get("OPENAI_API_KEY") or config.openai_api_key

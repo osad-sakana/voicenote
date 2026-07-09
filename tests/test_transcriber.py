@@ -6,8 +6,16 @@
 
 from pathlib import Path
 
+import pytest
+
 from config import VoiceNoteConfig
-from transcriber import transcribe
+from transcriber import transcribe, transcribe_audio_openai
+
+
+class TestTranscribeAudioOpenai:
+    def test_raises_value_error_when_api_key_missing(self):
+        with pytest.raises(ValueError, match="OpenAI APIキー"):
+            transcribe_audio_openai(Path("/tmp/audio.wav"), None)
 
 
 class TestTranscribe:
@@ -18,7 +26,7 @@ class TestTranscribe:
             calls["args"] = (audio_path, model_name, progress_callback, vad_filter)
             return "local result"
 
-        def fake_transcribe_audio_openai(audio_path, progress_callback=None):
+        def fake_transcribe_audio_openai(audio_path, api_key, progress_callback=None):
             raise AssertionError("openai 版は呼ばれてはいけない")
 
         monkeypatch.setattr("transcriber.transcribe_audio", fake_transcribe_audio)
@@ -39,19 +47,20 @@ class TestTranscribe:
         def fake_transcribe_audio(audio_path, model_name, progress_callback=None, vad_filter=True):
             raise AssertionError("local 版は呼ばれてはいけない")
 
-        def fake_transcribe_audio_openai(audio_path, progress_callback=None):
-            calls["args"] = (audio_path, progress_callback)
+        def fake_transcribe_audio_openai(audio_path, api_key, progress_callback=None):
+            calls["args"] = (audio_path, api_key, progress_callback)
             return "openai result"
 
         monkeypatch.setattr("transcriber.transcribe_audio", fake_transcribe_audio)
         monkeypatch.setattr("transcriber.transcribe_audio_openai", fake_transcribe_audio_openai)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
-        config = VoiceNoteConfig(transcription_mode="openai")
+        config = VoiceNoteConfig(transcription_mode="openai", openai_api_key="sk-test")
         audio_path = Path("/tmp/audio.wav")
         result = transcribe(audio_path, config)
 
         assert result == "openai result"
-        assert calls["args"] == (audio_path, None)
+        assert calls["args"] == (audio_path, "sk-test", None)
 
     def test_progress_callback_is_passed_through(self, monkeypatch):
         received = {}

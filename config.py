@@ -88,6 +88,11 @@ def save_config(config_path: Path, config: VoiceNoteConfig):
         raise RuntimeError(f"設定ファイルの保存エラー: {e}") from e
 
 
+def resolve_api_key(config: VoiceNoteConfig) -> str | None:
+    """環境変数を優先し、なければ設定からOpenAI APIキーを取得する。"""
+    return os.environ.get("OPENAI_API_KEY") or config.openai_api_key
+
+
 def configure_interactive() -> VoiceNoteConfig:
     """対話的に設定を入力する（CLI用）"""
     console.print(
@@ -190,9 +195,7 @@ def configure_interactive() -> VoiceNoteConfig:
             console.print("[green]✓ ルールベース整形を選択しました[/green]")
             break
         elif fmt_choice == "2":
-            import os as _os
-
-            api_key_available = _os.environ.get("OPENAI_API_KEY") or openai_api_key
+            api_key_available = resolve_api_key(VoiceNoteConfig(openai_api_key=openai_api_key))
             if not api_key_available:
                 console.print(
                     "[yellow]⚠ OPENAI_API_KEYが設定されていません。ルールベース整形を使用します。[/yellow]"
