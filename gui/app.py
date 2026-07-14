@@ -164,6 +164,7 @@ class App(ctk.CTk):
             messagebox.showerror("録音エラー", error_message)
 
     def _stop_recording(self):
+        self._set_processing(True)
         self._exec_btn.configure(text="実行", fg_color=PRIMARY_BUTTON_COLOR)
         rec_dest = Path(self._rec_dest_entry.get().strip() or str(Path.home() / "Desktop"))
         mode = self._mode_var.get()
@@ -176,6 +177,7 @@ class App(ctk.CTk):
             title, message = error
             messagebox.showwarning(title, message)
             return
+        self._set_processing(True)
         self._workflow.run_transcribe_only(Path(audio_path))
 
     # ──────────────── workflow コールバック (メインスレッドで実行) ────────────────

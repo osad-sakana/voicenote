@@ -200,6 +200,67 @@ class TestRecordingWorkflowStopAndProcess:
         assert spy.done == [saved_note]
         assert spy.record_only_done == []
 
+    def test_save_wav_failure_reports_error(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+        def fail_save_wav(data, dest):
+            raise OSError("ディスク書き込みエラー")
+
+        monkeypatch.setattr(workflow_module, "save_wav", fail_save_wav)
+
+        spy = SpyCallbacks()
+        recorder = FakeRecorder()
+        wf = RecordingWorkflow(VoiceNoteConfig(), spy.build(), recorder_factory=lambda d: recorder)
+
+        monkeypatch.setattr(workflow_module.threading, "Thread", DeferredThread)
+        wf.start(device_id=None, device_label="デバイスなし")
+
+        monkeypatch.setattr(workflow_module.threading, "Thread", ImmediateThread)
+        wf.stop_and_process(tmp_path, MODE_RECORD_TRANSCRIBE)
+
+        assert spy.done == []
+        assert spy.record_only_done == []
+        assert any("エラー" in msg for msg in spy.errors)
+
+    def test_unexpected_exception_in_process_audio_is_reported(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ):
+        # _process_audio の内側 try (save_wav 呼び出し) より前段で例外を起こし、
+        # 外側の except (「予期せぬエラー」ハンドラ) を通ることを検証する
+        errors: list[str] = []
+        log_calls = {"count": 0}
+
+        def raise_on_process_audio_log(msg: str):
+            # stop_and_process 自体が発行する3回の on_log (停止/クローズ/取得完了) の後、
+            # _process_audio の最初の on_log ("WAVファイルを書き込み中...") で例外を発生させる
+            log_calls["count"] += 1
+            if log_calls["count"] > 3:
+                raise RuntimeError("ログ書き込み中の想定外エラー")
+
+        callbacks = WorkflowCallbacks(
+            on_status=lambda msg: None,
+            on_log=raise_on_process_audio_log,
+            on_recording_started=lambda: None,
+            on_processing_started=lambda: None,
+            on_done=lambda path: None,
+            on_record_only_done=lambda path: None,
+            on_error=errors.append,
+        )
+
+        recorder = FakeRecorder()
+        log_file = tmp_path / "app.log"
+        wf = RecordingWorkflow(
+            VoiceNoteConfig(), callbacks, recorder_factory=lambda d: recorder, log_file=log_file
+        )
+
+        monkeypatch.setattr(workflow_module.threading, "Thread", DeferredThread)
+        wf.start(device_id=None, device_label="デバイスなし")
+        log_calls["count"] = 0  # start() 内の on_log 呼び出し分をリセット
+
+        monkeypatch.setattr(workflow_module.threading, "Thread", ImmediateThread)
+        wf.stop_and_process(tmp_path, MODE_RECORD_TRANSCRIBE)
+
+        assert len(errors) == 1
+        assert log_file.name in errors[0]
+
     def test_get_data_failure_reports_error(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
         spy = SpyCallbacks()
         recorder = FakeRecorder(fail_get_data=True)
