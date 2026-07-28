@@ -21,7 +21,18 @@ voicenote = "main:main"
 voicenote-cli = "main_cli:main"
 
 [tool.setuptools]
-py-modules = ["main", "main_cli", "config", "recorder", "transcriber", "note_writer"]
+py-modules = [
+    "main",
+    "main_cli",
+    "config",
+    "recorder",
+    "transcriber",
+    "note_writer",
+    "formatter",
+    "logging_setup",
+    "pipeline",
+]
+packages = ["gui"]
 
 [dependency-groups]
 dev = [
