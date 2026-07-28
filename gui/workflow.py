@@ -20,7 +20,7 @@ import numpy as np
 
 from config import VoiceNoteConfig
 from pipeline import save_wav, transcribe_and_save
-from recorder import ThreadedRecorder
+from recorder import STREAM_STOP_TIMEOUT_SEC, ThreadedRecorder
 
 from .constants import MODE_RECORD_ONLY, MODE_RECORD_TRANSCRIBE
 
@@ -65,14 +65,23 @@ class RecordingWorkflow:
         callbacks: WorkflowCallbacks,
         recorder_factory: Callable[[int | None], ThreadedRecorder] = ThreadedRecorder,
         log_file: Path | None = None,
+        stop_timeout: float = STREAM_STOP_TIMEOUT_SEC,
+        thread_factory: Callable[..., threading.Thread] = threading.Thread,
+        # thread_factory はテスト用に差し替え可能だが、shutdown() は返り値の
+        # join(timeout) を呼ぶため、threading.Thread と同じ join() を持つ必要がある。
     ):
         self._config = config
         self._callbacks = callbacks
         self._recorder_factory = recorder_factory
         self._log_file = log_file
+        self._stop_timeout = stop_timeout
+        self._thread_factory = thread_factory
         self._recorder: ThreadedRecorder | None = None
         self._recording = False
         self._elapsed = 0
+        self._stopping = False
+        self._pending_close_recorder: ThreadedRecorder | None = None
+        self._pending_close_since: float | None = None
 
     @property
     def is_recording(self) -> bool:
@@ -83,6 +92,38 @@ class RecordingWorkflow:
 
     def start(self, device_id: int | None, device_label: str) -> str | None:
         """録音を開始する。失敗時はエラーメッセージを返す。"""
+        if self._stopping:
+            return (
+                "前回の録音の停止・保存処理が完了していません。しばらく待ってから再試行してください"
+            )
+        if self._pending_close_recorder is not None:
+            # PortAudio 側が完全にハングし is_closing() が永遠に True を返し続ける
+            # 可能性がある (Issue #19 そのものの失敗モード) ため、stop_timeout の
+            # 数倍を超えたら諦めて再録音を許可する (放棄済みストリームは残り続けるが、
+            # ユーザーがアプリを使えなくなることを優先して回避する)。
+            # since が万一 None (recorder 代入と since 代入の間に読んだ場合) なら
+            # 「たった今」とみなし elapsed=0 として安全側 (＝待たせる) に倒す。
+            since = (
+                self._pending_close_since
+                if self._pending_close_since is not None
+                else time.monotonic()
+            )
+            elapsed = time.monotonic() - since
+            if self._pending_close_recorder.is_closing() and elapsed < self._stop_timeout * 3:
+                return (
+                    "前回のストリームがまだ解放されていません。しばらく待ってから再試行してください"
+                )
+            if self._pending_close_recorder.is_closing():
+                _logger.warning(
+                    "放棄したストリームが %.1f 秒経っても解放されないため、再録音を許可します",
+                    elapsed,
+                )
+                self._callbacks.on_log(
+                    f"前回のストリームが {elapsed:.0f}秒経っても解放されないため、録音を再開します"
+                )
+            self._pending_close_recorder = None
+            self._pending_close_since = None
+
         recorder = self._recorder_factory(device_id)
         try:
             recorder.start()
@@ -94,46 +135,116 @@ class RecordingWorkflow:
         self._elapsed = 0
         self._callbacks.on_recording_started()
         self._callbacks.on_log(f"録音開始 (デバイス: {device_label})")
-        threading.Thread(target=self._timer_loop, daemon=True).start()
+        self._thread_factory(target=self._timer_loop, daemon=True).start()
         return None
 
     def stop_and_process(self, rec_dest: Path, mode: str) -> None:
-        """録音を停止し、WAV保存 → (必要なら) 文字起こしをバックグラウンドスレッドで実行する。"""
-        self._recording = False
-        self._callbacks.on_status("保存中...")
-        self._callbacks.on_log("録音停止 → ストリームを閉じています...")
+        """録音を停止し、WAV保存 → (必要なら) 文字起こしをバックグラウンドスレッドで実行する。
 
+        `ThreadedRecorder.stop_with_timeout()` (延いては PortAudio の stop()/close()) が
+        長時間ブロックすることがあるため、停止処理そのものをバックグラウンドスレッドに
+        移し、呼び出し元 (Tkinter メインスレッド) を一切ブロックしない。
+        """
+        self._recording = False
         recorder = self._recorder
         self._recorder = None
         if recorder is None:
             return
-        recorder.stop()
-        self._callbacks.on_log("ストリームを閉じました。データを結合中...")
-        try:
-            audio_data = recorder.get_data()
-        except RuntimeError as e:
-            self._callbacks.on_error(f"エラー: {e}")
-            return
-        self._callbacks.on_log(f"録音データ取得完了 ({len(audio_data) / 16000:.1f}秒)")
 
-        self._callbacks.on_processing_started()
-        threading.Thread(
-            target=self._process_audio, args=(audio_data, rec_dest, mode), daemon=True
-        ).start()
+        self._stopping = True
+        self._callbacks.on_status("保存中...")
+        self._callbacks.on_log("録音停止 → ストリームを閉じています...")
+
+        try:
+            self._thread_factory(
+                target=self._stop_and_process_worker, args=(recorder, rec_dest, mode), daemon=True
+            ).start()
+        except Exception:
+            # スレッド生成自体に失敗すると _stopping が固着し、以降ずっと
+            # start() を拒否し続けてしまうため、ここで確実に解除する。
+            self._stopping = False
+            _logger.error("停止ワーカーの起動に失敗:\n%s", traceback.format_exc())
+            self._callbacks.on_error("予期せぬエラーが発生しました（停止処理を開始できません）")
+
+    def _stop_and_process_worker(self, recorder: ThreadedRecorder, rec_dest: Path, mode: str):
+        # UIキュー経由のコールバックはメインスレッドが応答しないと反映されないため、
+        # 万一メインスレッド側がハングした場合の切り分け用に直接ログも残す。
+        _logger.info("停止ワーカー開始: stop_with_timeout(%s) を呼び出します", self._stop_timeout)
+        timed_out = False
+        try:
+            closed = recorder.stop_with_timeout(self._stop_timeout)
+            _logger.info("stop_with_timeout 完了 (closed=%s)", closed)
+            if closed:
+                self._callbacks.on_log("ストリームを閉じました。データを結合中...")
+            else:
+                timed_out = True
+                _logger.warning(
+                    "ストリームの停止がタイムアウトしました（%s秒）", self._stop_timeout
+                )
+                self._callbacks.on_log(
+                    "ストリームの停止がタイムアウトしました。録音データの保存を続行します"
+                )
+            try:
+                audio_data = recorder.get_data()
+            except RuntimeError as e:
+                _logger.warning("get_data 失敗: %s", e)
+                self._callbacks.on_error(f"エラー: {e}")
+                return
+            _logger.info("get_data 完了 (%d サンプル)", len(audio_data))
+            self._callbacks.on_log(f"録音データ取得完了 ({len(audio_data) / 16000:.1f}秒)")
+
+            self._callbacks.on_processing_started()
+            self._process_audio(audio_data, rec_dest, mode)
+        except Exception:
+            _logger.error("_stop_and_process_worker で未捕捉の例外:\n%s", traceback.format_exc())
+            log_name = self._log_file.name if self._log_file else "ログファイル"
+            self._callbacks.on_error(f"予期せぬエラーが発生しました（ログを確認: {log_name}）")
+        finally:
+            # `_pending_close_since` を「再入ガードが実際に効き始める瞬間」
+            # (= _stopping が False になり start() を受け付け得る瞬間) に合わせて
+            # 打刻する。ここより前 (stop_with_timeout 直後) に打刻すると、後続の
+            # 保存・文字起こしに要した時間がそのまま経過時間に混入し、start() が
+            # 呼べるようになった時点で既に猶予を使い切っていることが多くなる。
+            # since → recorder の順で代入することで、別スレッドの start() が
+            # 「recorder はあるが since はまだ None」という中間状態を観測しない
+            # ようにしている (`is not None` チェックの前に必ず since が入っている)。
+            if timed_out:
+                self._pending_close_since = time.monotonic()
+                self._pending_close_recorder = recorder
+            self._stopping = False
 
     def run_transcribe_only(self, audio_file: Path) -> None:
         """文字起こしのみモードをバックグラウンドスレッドで実行する。"""
         self._callbacks.on_processing_started()
-        threading.Thread(target=self._run_transcription, args=(audio_file,), daemon=True).start()
+        self._thread_factory(
+            target=self._run_transcription, args=(audio_file,), daemon=True
+        ).start()
 
     def shutdown(self) -> None:
-        """アプリ終了時に録音中であれば安全に停止する。"""
+        """アプリ終了時に録音中であれば安全に停止する。
+
+        ウィンドウを閉じる操作もメインスレッドから同期的に呼ばれるため、
+        ここでも停止処理をデーモンスレッドへ逃がし、ごく短い猶予だけ待ってから
+        制御を返す（`self.destroy()` を数秒ブロックさせないため）。
+        ストリームの停止自体はバックグラウンドで完走するので、猶予内に
+        終わらなくても放置して問題ない。
+        """
         self._recording = False
         recorder = self._recorder
         self._recorder = None
-        if recorder is not None:
+        if recorder is None:
+            return
+
+        def _stop():
             with contextlib.suppress(Exception):
-                recorder.stop()
+                recorder.stop_with_timeout(self._stop_timeout)
+
+        stopper = self._thread_factory(target=_stop, daemon=True)
+        stopper.start()
+        stopper.join(1.0)
+        # アプリ終了時はこの後 destroy() が呼ばれプロセスが終わるため、
+        # stop_and_process() と違い _pending_close_recorder は追跡しない
+        # (次の start() が同一プロセス内で起きることはない)。
 
     # ──────────────── 内部: バックグラウンドスレッドで実行される処理 ────────────────
 
