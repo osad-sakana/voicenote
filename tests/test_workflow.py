@@ -32,6 +32,19 @@ class ImmediateThread:
         self._target(*self._args)
 
 
+class CapturingThread(threading.Thread):
+    """実スレッドとして動きつつ、生成したインスタンスをテスト側で回収できるスタブ。
+
+    テスト終了時に確実に join してリークを防ぐために使う。
+    """
+
+    instances: list["CapturingThread"] = []
+
+    def __init__(self, target, args=(), daemon=None):
+        super().__init__(target=target, args=args, daemon=daemon)
+        CapturingThread.instances.append(self)
+
+
 class DeferredThread:
     """スレッドを起動せずターゲットをキャプチャするだけのスタブ (タイマーループ用)。"""
 
@@ -355,7 +368,8 @@ class TestRecordingWorkflowStopDoesNotBlockCaller:
         wf.start(device_id=None, device_label="デバイスなし")
 
         # 実スレッドを使う (ImmediateThread ではブロックの意味がなくなるため)
-        monkeypatch.setattr(workflow_module.threading, "Thread", threading.Thread)
+        CapturingThread.instances.clear()
+        monkeypatch.setattr(workflow_module.threading, "Thread", CapturingThread)
         try:
             start = time.monotonic()
             wf.stop_and_process(tmp_path, MODE_RECORD_TRANSCRIBE)
@@ -365,6 +379,8 @@ class TestRecordingWorkflowStopDoesNotBlockCaller:
             assert wf.is_recording is False
         finally:
             block.set()
+            for t in CapturingThread.instances:
+                t.join(timeout=1.0)
 
     def test_start_rejected_while_stop_in_progress(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -373,11 +389,18 @@ class TestRecordingWorkflowStopDoesNotBlockCaller:
         spy = SpyCallbacks()
         recorder = FakeRecorder(block_on_stop=block)
         wf = RecordingWorkflow(VoiceNoteConfig(), spy.build(), recorder_factory=lambda d: recorder)
+        monkeypatch.setattr(workflow_module, "save_wav", lambda data, dest: tmp_path / "out.wav")
+        monkeypatch.setattr(
+            workflow_module,
+            "transcribe_and_save",
+            lambda audio_file, config, progress_callback=None: tmp_path / "out.md",
+        )
 
         monkeypatch.setattr(workflow_module.threading, "Thread", DeferredThread)
         wf.start(device_id=None, device_label="デバイスなし")
 
-        monkeypatch.setattr(workflow_module.threading, "Thread", threading.Thread)
+        CapturingThread.instances.clear()
+        monkeypatch.setattr(workflow_module.threading, "Thread", CapturingThread)
         try:
             wf.stop_and_process(tmp_path, MODE_RECORD_TRANSCRIBE)
 
@@ -387,6 +410,8 @@ class TestRecordingWorkflowStopDoesNotBlockCaller:
             assert "停止処理" in error
         finally:
             block.set()
+            for t in CapturingThread.instances:
+                t.join(timeout=1.0)
 
 
 class TestRecordingWorkflowStopTimeoutFallback:
@@ -428,10 +453,43 @@ class TestRecordingWorkflowShutdown:
         wf = RecordingWorkflow(VoiceNoteConfig(), spy.build(), recorder_factory=lambda d: recorder)
         wf.start(device_id=None, device_label="デバイスなし")
 
-        wf.shutdown()
+        # shutdown() 内部の停止処理は実スレッドで動く (join(timeout) を要求するため)。
+        # DeferredThread 自身を threading.Thread へ再代入すると、同一モジュールを
+        # 参照している「元の実クラス」まで上書きされてしまうため、collection 時に
+        # 捕捉済みの実クラスを継承する CapturingThread 経由で復元する。
+        CapturingThread.instances.clear()
+        monkeypatch.setattr(workflow_module.threading, "Thread", CapturingThread)
+        try:
+            wf.shutdown()
 
-        assert wf.is_recording is False
-        assert recorder.stopped is True
+            assert wf.is_recording is False
+            assert recorder.stopped is True
+        finally:
+            for t in CapturingThread.instances:
+                t.join(timeout=1.0)
+
+    def test_shutdown_does_not_block_when_stop_hangs(self, monkeypatch: pytest.MonkeyPatch):
+        block = threading.Event()
+        spy = SpyCallbacks()
+        recorder = FakeRecorder(block_on_stop=block)
+        wf = RecordingWorkflow(VoiceNoteConfig(), spy.build(), recorder_factory=lambda d: recorder)
+
+        monkeypatch.setattr(workflow_module.threading, "Thread", DeferredThread)
+        wf.start(device_id=None, device_label="デバイスなし")
+
+        CapturingThread.instances.clear()
+        monkeypatch.setattr(workflow_module.threading, "Thread", CapturingThread)
+        try:
+            start = time.monotonic()
+            wf.shutdown()
+            elapsed = time.monotonic() - start
+
+            assert elapsed < 2.0
+            assert wf.is_recording is False
+        finally:
+            block.set()
+            for t in CapturingThread.instances:
+                t.join(timeout=1.0)
 
     def test_shutdown_when_not_recording_is_noop(self):
         spy = SpyCallbacks()

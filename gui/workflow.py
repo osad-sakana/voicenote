@@ -125,8 +125,12 @@ class RecordingWorkflow:
         ).start()
 
     def _stop_and_process_worker(self, recorder: ThreadedRecorder, rec_dest: Path, mode: str):
+        # UIキュー経由のコールバックはメインスレッドが応答しないと反映されないため、
+        # 万一メインスレッド側がハングした場合の切り分け用に直接ログも残す。
+        _logger.info("停止ワーカー開始: stop_with_timeout(%s) を呼び出します", self._stop_timeout)
         try:
             closed = recorder.stop_with_timeout(self._stop_timeout)
+            _logger.info("stop_with_timeout 完了 (closed=%s)", closed)
             if not closed:
                 _logger.warning("ストリームの停止がタイムアウトしました（%s秒）", self._stop_timeout)
                 self._callbacks.on_log(
@@ -136,8 +140,10 @@ class RecordingWorkflow:
             try:
                 audio_data = recorder.get_data()
             except RuntimeError as e:
+                _logger.warning("get_data 失敗: %s", e)
                 self._callbacks.on_error(f"エラー: {e}")
                 return
+            _logger.info("get_data 完了 (%d サンプル)", len(audio_data))
             self._callbacks.on_log(f"録音データ取得完了 ({len(audio_data) / 16000:.1f}秒)")
 
             self._callbacks.on_processing_started()
@@ -157,15 +163,25 @@ class RecordingWorkflow:
     def shutdown(self) -> None:
         """アプリ終了時に録音中であれば安全に停止する。
 
-        `stop_with_timeout` を使うことで、PortAudio の停止処理がハングしても
-        最大 `self._stop_timeout` 秒でアプリの終了処理へ制御を返す。
+        ウィンドウを閉じる操作もメインスレッドから同期的に呼ばれるため、
+        ここでも停止処理をデーモンスレッドへ逃がし、ごく短い猶予だけ待ってから
+        制御を返す（`self.destroy()` を数秒ブロックさせないため）。
+        ストリームの停止自体はバックグラウンドで完走するので、猶予内に
+        終わらなくても放置して問題ない。
         """
         self._recording = False
         recorder = self._recorder
         self._recorder = None
-        if recorder is not None:
+        if recorder is None:
+            return
+
+        def _stop():
             with contextlib.suppress(Exception):
                 recorder.stop_with_timeout(self._stop_timeout)
+
+        stopper = threading.Thread(target=_stop, daemon=True)
+        stopper.start()
+        stopper.join(1.0)
 
     # ──────────────── 内部: バックグラウンドスレッドで実行される処理 ────────────────
 
