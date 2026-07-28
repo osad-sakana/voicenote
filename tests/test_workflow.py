@@ -119,8 +119,12 @@ class SpyCallbacks:
         return WorkflowCallbacks(
             on_status=self.status.append,
             on_log=self.logs.append,
-            on_recording_started=lambda: setattr(self, "recording_started", self.recording_started + 1),
-            on_processing_started=lambda: setattr(self, "processing_started", self.processing_started + 1),
+            on_recording_started=lambda: setattr(
+                self, "recording_started", self.recording_started + 1
+            ),
+            on_processing_started=lambda: setattr(
+                self, "processing_started", self.processing_started + 1
+            ),
             on_done=self.done.append,
             on_record_only_done=self.record_only_done.append,
             on_error=self.errors.append,
@@ -403,6 +407,7 @@ class TestRecordingWorkflowStopDoesNotBlockCaller:
             block.set()
             for t in CapturingThread.instances:
                 t.join(timeout=1.0)
+                assert not t.is_alive()
 
     def test_start_rejected_while_stop_in_progress(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -432,15 +437,18 @@ class TestRecordingWorkflowStopDoesNotBlockCaller:
             error = wf.start(device_id=None, device_label="デバイスなし")
 
             assert error is not None
-            assert "停止処理" in error
+            assert "停止" in error
         finally:
             block.set()
             for t in CapturingThread.instances:
                 t.join(timeout=1.0)
+                assert not t.is_alive()
 
 
 class TestRecordingWorkflowStopTimeoutFallback:
-    def test_stop_timeout_still_saves_recording(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    def test_stop_timeout_still_saves_recording(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ):
         """stop_with_timeout がタイムアウト (False) を返しても録音データの保存は続行される。"""
         saved_note = tmp_path / "out.md"
         monkeypatch.setattr(workflow_module, "save_wav", lambda data, dest: tmp_path / "out.wav")
@@ -507,6 +515,8 @@ class TestRecordingWorkflowStopTimeoutFallback:
         wf._thread_factory = DeferredThread
         error = wf.start(device_id=None, device_label="デバイスなし")
         assert error is None
+        assert wf._pending_close_recorder is None
+        assert wf._recorder.started is True
 
 
 class TestRecordingWorkflowShutdown:
@@ -532,6 +542,7 @@ class TestRecordingWorkflowShutdown:
         finally:
             for t in CapturingThread.instances:
                 t.join(timeout=1.0)
+                assert not t.is_alive()
 
     def test_shutdown_does_not_block_when_stop_hangs(self):
         block = threading.Event()
@@ -558,6 +569,7 @@ class TestRecordingWorkflowShutdown:
             block.set()
             for t in CapturingThread.instances:
                 t.join(timeout=1.0)
+                assert not t.is_alive()
 
     def test_shutdown_when_not_recording_is_noop(self):
         spy = SpyCallbacks()

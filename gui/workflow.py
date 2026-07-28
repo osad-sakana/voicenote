@@ -67,6 +67,8 @@ class RecordingWorkflow:
         log_file: Path | None = None,
         stop_timeout: float = STREAM_STOP_TIMEOUT_SEC,
         thread_factory: Callable[..., threading.Thread] = threading.Thread,
+        # thread_factory はテスト用に差し替え可能だが、shutdown() は返り値の
+        # join(timeout) を呼ぶため、threading.Thread と同じ join() を持つ必要がある。
     ):
         self._config = config
         self._callbacks = callbacks
@@ -79,6 +81,7 @@ class RecordingWorkflow:
         self._elapsed = 0
         self._stopping = False
         self._pending_close_recorder: ThreadedRecorder | None = None
+        self._pending_close_since: float | None = None
 
     @property
     def is_recording(self) -> bool:
@@ -90,11 +93,27 @@ class RecordingWorkflow:
     def start(self, device_id: int | None, device_label: str) -> str | None:
         """録音を開始する。失敗時はエラーメッセージを返す。"""
         if self._stopping:
-            return "前回の録音の停止処理が完了していません。しばらく待ってから再試行してください"
+            return (
+                "前回の録音の停止・保存処理が完了していません。しばらく待ってから再試行してください"
+            )
         if self._pending_close_recorder is not None:
+            # PortAudio 側が完全にハングし is_closing() が永遠に True を返し続ける
+            # 可能性がある (Issue #19 そのものの失敗モード) ため、stop_timeout の
+            # 数倍を超えたら諦めて再録音を許可する (放棄済みストリームは残り続けるが、
+            # ユーザーがアプリを使えなくなることを優先して回避する)。
+            since = self._pending_close_since or 0.0
+            elapsed = time.monotonic() - since
+            if self._pending_close_recorder.is_closing() and elapsed < self._stop_timeout * 3:
+                return (
+                    "前回のストリームがまだ解放されていません。しばらく待ってから再試行してください"
+                )
             if self._pending_close_recorder.is_closing():
-                return "前回のストリームがまだ解放されていません。しばらく待ってから再試行してください"
+                _logger.warning(
+                    "放棄したストリームが %.1f 秒経っても解放されないため、再録音を許可します",
+                    elapsed,
+                )
             self._pending_close_recorder = None
+            self._pending_close_since = None
 
         recorder = self._recorder_factory(device_id)
         try:
@@ -147,7 +166,10 @@ class RecordingWorkflow:
                 # start() が _stopping ガードを通過できる時点では代入は必ず可視化
                 # されている。_stopping を先に False にする変更をする場合は要注意。
                 self._pending_close_recorder = recorder
-                _logger.warning("ストリームの停止がタイムアウトしました（%s秒）", self._stop_timeout)
+                self._pending_close_since = time.monotonic()
+                _logger.warning(
+                    "ストリームの停止がタイムアウトしました（%s秒）", self._stop_timeout
+                )
                 self._callbacks.on_log(
                     "ストリームの停止がタイムアウトしました。録音データの保存を続行します"
                 )
@@ -172,7 +194,9 @@ class RecordingWorkflow:
     def run_transcribe_only(self, audio_file: Path) -> None:
         """文字起こしのみモードをバックグラウンドスレッドで実行する。"""
         self._callbacks.on_processing_started()
-        self._thread_factory(target=self._run_transcription, args=(audio_file,), daemon=True).start()
+        self._thread_factory(
+            target=self._run_transcription, args=(audio_file,), daemon=True
+        ).start()
 
     def shutdown(self) -> None:
         """アプリ終了時に録音中であれば安全に停止する。
