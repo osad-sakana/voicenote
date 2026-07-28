@@ -101,7 +101,13 @@ class RecordingWorkflow:
             # 可能性がある (Issue #19 そのものの失敗モード) ため、stop_timeout の
             # 数倍を超えたら諦めて再録音を許可する (放棄済みストリームは残り続けるが、
             # ユーザーがアプリを使えなくなることを優先して回避する)。
-            since = self._pending_close_since or 0.0
+            # since が万一 None (recorder 代入と since 代入の間に読んだ場合) なら
+            # 「たった今」とみなし elapsed=0 として安全側 (＝待たせる) に倒す。
+            since = (
+                self._pending_close_since
+                if self._pending_close_since is not None
+                else time.monotonic()
+            )
             elapsed = time.monotonic() - since
             if self._pending_close_recorder.is_closing() and elapsed < self._stop_timeout * 3:
                 return (
@@ -111,6 +117,9 @@ class RecordingWorkflow:
                 _logger.warning(
                     "放棄したストリームが %.1f 秒経っても解放されないため、再録音を許可します",
                     elapsed,
+                )
+                self._callbacks.on_log(
+                    f"前回のストリームが {elapsed:.0f}秒経っても解放されないため、録音を再開します"
                 )
             self._pending_close_recorder = None
             self._pending_close_since = None
@@ -146,27 +155,29 @@ class RecordingWorkflow:
         self._callbacks.on_status("保存中...")
         self._callbacks.on_log("録音停止 → ストリームを閉じています...")
 
-        self._thread_factory(
-            target=self._stop_and_process_worker, args=(recorder, rec_dest, mode), daemon=True
-        ).start()
+        try:
+            self._thread_factory(
+                target=self._stop_and_process_worker, args=(recorder, rec_dest, mode), daemon=True
+            ).start()
+        except Exception:
+            # スレッド生成自体に失敗すると _stopping が固着し、以降ずっと
+            # start() を拒否し続けてしまうため、ここで確実に解除する。
+            self._stopping = False
+            _logger.error("停止ワーカーの起動に失敗:\n%s", traceback.format_exc())
+            self._callbacks.on_error("予期せぬエラーが発生しました（停止処理を開始できません）")
 
     def _stop_and_process_worker(self, recorder: ThreadedRecorder, rec_dest: Path, mode: str):
         # UIキュー経由のコールバックはメインスレッドが応答しないと反映されないため、
         # 万一メインスレッド側がハングした場合の切り分け用に直接ログも残す。
         _logger.info("停止ワーカー開始: stop_with_timeout(%s) を呼び出します", self._stop_timeout)
+        timed_out = False
         try:
             closed = recorder.stop_with_timeout(self._stop_timeout)
             _logger.info("stop_with_timeout 完了 (closed=%s)", closed)
             if closed:
                 self._callbacks.on_log("ストリームを閉じました。データを結合中...")
             else:
-                # ここでの書き込みはワーカースレッド、start() での読み取りはメイン
-                # スレッド。GIL下で単一属性への代入は分断されず、かつ下の finally で
-                # _stopping を False にする前に必ずこの代入が完了しているため、
-                # start() が _stopping ガードを通過できる時点では代入は必ず可視化
-                # されている。_stopping を先に False にする変更をする場合は要注意。
-                self._pending_close_recorder = recorder
-                self._pending_close_since = time.monotonic()
+                timed_out = True
                 _logger.warning(
                     "ストリームの停止がタイムアウトしました（%s秒）", self._stop_timeout
                 )
@@ -189,6 +200,17 @@ class RecordingWorkflow:
             log_name = self._log_file.name if self._log_file else "ログファイル"
             self._callbacks.on_error(f"予期せぬエラーが発生しました（ログを確認: {log_name}）")
         finally:
+            # `_pending_close_since` を「再入ガードが実際に効き始める瞬間」
+            # (= _stopping が False になり start() を受け付け得る瞬間) に合わせて
+            # 打刻する。ここより前 (stop_with_timeout 直後) に打刻すると、後続の
+            # 保存・文字起こしに要した時間がそのまま経過時間に混入し、start() が
+            # 呼べるようになった時点で既に猶予を使い切っていることが多くなる。
+            # since → recorder の順で代入することで、別スレッドの start() が
+            # 「recorder はあるが since はまだ None」という中間状態を観測しない
+            # ようにしている (`is not None` チェックの前に必ず since が入っている)。
+            if timed_out:
+                self._pending_close_since = time.monotonic()
+                self._pending_close_recorder = recorder
             self._stopping = False
 
     def run_transcribe_only(self, audio_file: Path) -> None:

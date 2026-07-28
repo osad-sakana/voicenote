@@ -67,8 +67,16 @@ class TestStopWithTimeout:
             assert elapsed < 1.0
             # ストリームは即座に手放され、以降呼び出し元から再利用されない
             assert recorder._stream is None
+            # 放棄した close 処理はバックグラウンドでまだ進行中のはず
+            assert recorder.is_closing() is True
         finally:
             block.set()
+            # block を解除すると、放棄されたクローズ処理もいずれ完了する
+            for _ in range(100):
+                if not recorder.is_closing():
+                    break
+                time.sleep(0.01)
+            assert recorder.is_closing() is False
 
     def test_data_survives_timeout(self):
         """タイムアウトしてストリームを放棄しても、既に取得済みの録音データは失われない。"""
