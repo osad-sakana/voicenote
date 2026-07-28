@@ -57,6 +57,7 @@ class ThreadedRecorder:
         self._lock = threading.Lock()
         self._stream: sd.InputStream | None = None
         self._running = False
+        self._closer_thread: threading.Thread | None = None
 
     def _callback(self, indata, frames, time, status):
         if self._running:
@@ -109,9 +110,15 @@ class ThreadedRecorder:
                 _logger.exception("ストリームの停止/クローズ中にエラーが発生しました")
 
         closer = threading.Thread(target=_close, daemon=True)
+        self._closer_thread = closer
         closer.start()
         closer.join(timeout)
         return not closer.is_alive()
+
+    def is_closing(self) -> bool:
+        """stop_with_timeout() がタイムアウトして放棄したストリームの停止処理が、
+        バックグラウンドでまだ完了していないかを返す。"""
+        return self._closer_thread is not None and self._closer_thread.is_alive()
 
     def get_data(self) -> np.ndarray:
         with self._lock:

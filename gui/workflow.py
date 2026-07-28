@@ -66,16 +66,19 @@ class RecordingWorkflow:
         recorder_factory: Callable[[int | None], ThreadedRecorder] = ThreadedRecorder,
         log_file: Path | None = None,
         stop_timeout: float = STREAM_STOP_TIMEOUT_SEC,
+        thread_factory: Callable[..., threading.Thread] = threading.Thread,
     ):
         self._config = config
         self._callbacks = callbacks
         self._recorder_factory = recorder_factory
         self._log_file = log_file
         self._stop_timeout = stop_timeout
+        self._thread_factory = thread_factory
         self._recorder: ThreadedRecorder | None = None
         self._recording = False
         self._elapsed = 0
         self._stopping = False
+        self._pending_close_recorder: ThreadedRecorder | None = None
 
     @property
     def is_recording(self) -> bool:
@@ -88,6 +91,10 @@ class RecordingWorkflow:
         """録音を開始する。失敗時はエラーメッセージを返す。"""
         if self._stopping:
             return "前回の録音の停止処理が完了していません。しばらく待ってから再試行してください"
+        if self._pending_close_recorder is not None:
+            if self._pending_close_recorder.is_closing():
+                return "前回のストリームがまだ解放されていません。しばらく待ってから再試行してください"
+            self._pending_close_recorder = None
 
         recorder = self._recorder_factory(device_id)
         try:
@@ -100,7 +107,7 @@ class RecordingWorkflow:
         self._elapsed = 0
         self._callbacks.on_recording_started()
         self._callbacks.on_log(f"録音開始 (デバイス: {device_label})")
-        threading.Thread(target=self._timer_loop, daemon=True).start()
+        self._thread_factory(target=self._timer_loop, daemon=True).start()
         return None
 
     def stop_and_process(self, rec_dest: Path, mode: str) -> None:
@@ -110,17 +117,17 @@ class RecordingWorkflow:
         長時間ブロックすることがあるため、停止処理そのものをバックグラウンドスレッドに
         移し、呼び出し元 (Tkinter メインスレッド) を一切ブロックしない。
         """
+        self._recording = False
         recorder = self._recorder
         self._recorder = None
         if recorder is None:
             return
 
-        self._recording = False
         self._stopping = True
         self._callbacks.on_status("保存中...")
         self._callbacks.on_log("録音停止 → ストリームを閉じています...")
 
-        threading.Thread(
+        self._thread_factory(
             target=self._stop_and_process_worker, args=(recorder, rec_dest, mode), daemon=True
         ).start()
 
@@ -131,12 +138,19 @@ class RecordingWorkflow:
         try:
             closed = recorder.stop_with_timeout(self._stop_timeout)
             _logger.info("stop_with_timeout 完了 (closed=%s)", closed)
-            if not closed:
+            if closed:
+                self._callbacks.on_log("ストリームを閉じました。データを結合中...")
+            else:
+                # ここでの書き込みはワーカースレッド、start() での読み取りはメイン
+                # スレッド。GIL下で単一属性への代入は分断されず、かつ下の finally で
+                # _stopping を False にする前に必ずこの代入が完了しているため、
+                # start() が _stopping ガードを通過できる時点では代入は必ず可視化
+                # されている。_stopping を先に False にする変更をする場合は要注意。
+                self._pending_close_recorder = recorder
                 _logger.warning("ストリームの停止がタイムアウトしました（%s秒）", self._stop_timeout)
                 self._callbacks.on_log(
                     "ストリームの停止がタイムアウトしました。録音データの保存を続行します"
                 )
-            self._callbacks.on_log("ストリームを閉じました。データを結合中...")
             try:
                 audio_data = recorder.get_data()
             except RuntimeError as e:
@@ -158,7 +172,7 @@ class RecordingWorkflow:
     def run_transcribe_only(self, audio_file: Path) -> None:
         """文字起こしのみモードをバックグラウンドスレッドで実行する。"""
         self._callbacks.on_processing_started()
-        threading.Thread(target=self._run_transcription, args=(audio_file,), daemon=True).start()
+        self._thread_factory(target=self._run_transcription, args=(audio_file,), daemon=True).start()
 
     def shutdown(self) -> None:
         """アプリ終了時に録音中であれば安全に停止する。
@@ -179,9 +193,12 @@ class RecordingWorkflow:
             with contextlib.suppress(Exception):
                 recorder.stop_with_timeout(self._stop_timeout)
 
-        stopper = threading.Thread(target=_stop, daemon=True)
+        stopper = self._thread_factory(target=_stop, daemon=True)
         stopper.start()
         stopper.join(1.0)
+        # アプリ終了時はこの後 destroy() が呼ばれプロセスが終わるため、
+        # stop_and_process() と違い _pending_close_recorder は追跡しない
+        # (次の start() が同一プロセス内で起きることはない)。
 
     # ──────────────── 内部: バックグラウンドスレッドで実行される処理 ────────────────
 

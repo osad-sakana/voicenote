@@ -98,3 +98,4 @@ class TestStopWithTimeout:
 
         assert result is True
         assert stream.stop_called is True
+        assert stream.close_called is True
