@@ -3,6 +3,7 @@
 sounddeviceを使用したリアルタイム録音
 """
 
+import logging
 import signal
 import threading
 from collections.abc import Callable
@@ -10,7 +11,10 @@ from collections.abc import Callable
 import numpy as np
 import sounddevice as sd
 
+_logger = logging.getLogger("voicenote")
+
 SAMPLE_RATE = 16000
+STREAM_STOP_TIMEOUT_SEC = 5.0
 
 
 def list_devices() -> list[dict]:
@@ -77,6 +81,37 @@ class ThreadedRecorder:
             self._stream.stop()
             self._stream.close()
             self._stream = None
+
+    def stop_with_timeout(self, timeout: float = STREAM_STOP_TIMEOUT_SEC) -> bool:
+        """
+        stop() をタイムアウト付きで実行する。
+        PortAudio の stop()/close() が長時間ブロックする既知の問題（macOS）に対応するため、
+        実際の停止処理は内部スレッドで行い、呼び出し元は最大 timeout 秒だけ待つ。
+        タイムアウトした場合、ストリームは放棄され（例外送出中の可能性があるため触れない）、
+        以降 get_data() で録音済みデータを取得することはできる。
+
+        Returns:
+            timeout 内に stop()/close() が完了すれば True、タイムアウトすれば False
+        """
+        self._running = False
+        stream = self._stream
+        self._stream = None
+        if stream is None:
+            return True
+
+        def _close():
+            try:
+                try:
+                    stream.stop()
+                finally:
+                    stream.close()
+            except Exception:
+                _logger.exception("ストリームの停止/クローズ中にエラーが発生しました")
+
+        closer = threading.Thread(target=_close, daemon=True)
+        closer.start()
+        closer.join(timeout)
+        return not closer.is_alive()
 
     def get_data(self) -> np.ndarray:
         with self._lock:
