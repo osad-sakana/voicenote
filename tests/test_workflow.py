@@ -518,6 +518,77 @@ class TestRecordingWorkflowStopTimeoutFallback:
         assert wf._pending_close_recorder is None
         assert wf._recorder.started is True
 
+    def test_pending_close_gives_up_after_grace_period_even_if_still_closing(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ):
+        """放棄したストリームが stop_timeout の3倍を超えても解放されない場合、
+        is_closing() が True のままでも再録音を許可し、アプリが恒久的に
+        使用不能になることを防ぐ (Issue #19 の失敗モードそのものへの対策)。"""
+        monkeypatch.setattr(workflow_module, "save_wav", lambda data, dest: tmp_path / "out.wav")
+        monkeypatch.setattr(
+            workflow_module,
+            "transcribe_and_save",
+            lambda audio_file, config, progress_callback=None: tmp_path / "out.md",
+        )
+
+        spy = SpyCallbacks()
+        first_recorder = FakeRecorder(stop_timeout_result=False)
+        first_recorder.is_closing = lambda: True  # 猶予期間を過ぎても閉じない
+        recorders = iter([first_recorder, FakeRecorder()])
+        wf = RecordingWorkflow(
+            VoiceNoteConfig(),
+            spy.build(),
+            recorder_factory=lambda d: next(recorders),
+            stop_timeout=0.05,
+            thread_factory=DeferredThread,
+        )
+        wf.start(device_id=None, device_label="デバイスなし")
+
+        wf._thread_factory = ImmediateThread
+        wf.stop_and_process(tmp_path, MODE_RECORD_TRANSCRIBE)
+
+        # 猶予期間 (stop_timeout * 3 = 0.15秒) を過ぎたことにする
+        wf._pending_close_since = time.monotonic() - 10.0
+
+        wf._thread_factory = DeferredThread
+        error = wf.start(device_id=None, device_label="デバイスなし")
+
+        assert error is None
+        assert wf._pending_close_recorder is None
+        assert any("解放されない" in msg for msg in spy.logs)
+
+
+class TestRecordingWorkflowStopThreadCreationFailure:
+    def test_thread_creation_failure_does_not_stick_stopping_flag(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ):
+        """停止ワーカーのスレッド生成自体が失敗しても _stopping が固着せず、
+        on_error が呼ばれ、以降の start() を永久に拒否し続けないこと。"""
+
+        class FailingThreadFactory:
+            def __init__(self, target, args=(), daemon=None):
+                raise RuntimeError("スレッドを生成できません")
+
+        spy = SpyCallbacks()
+        recorder = FakeRecorder()
+        wf = RecordingWorkflow(
+            VoiceNoteConfig(),
+            spy.build(),
+            recorder_factory=lambda d: recorder,
+            thread_factory=DeferredThread,
+        )
+        wf.start(device_id=None, device_label="デバイスなし")
+
+        wf._thread_factory = FailingThreadFactory
+        wf.stop_and_process(tmp_path, MODE_RECORD_TRANSCRIBE)
+
+        assert wf._stopping is False
+        assert any("エラー" in msg for msg in spy.errors)
+
+        wf._thread_factory = DeferredThread
+        error = wf.start(device_id=None, device_label="デバイスなし")
+        assert error is None
+
 
 class TestRecordingWorkflowShutdown:
     def test_shutdown_stops_recorder_and_clears_state(self):
