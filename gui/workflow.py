@@ -179,6 +179,11 @@ class RecordingWorkflow:
             audio_file = recorder.finalize_recording()
             if audio_file is None:
                 _logger.warning("finalize_recording: 録音データがありません")
+                # 録音データがなくても PortAudio ストリームは開いたままなので、
+                # ここで確実に閉じておく (放置するとマイクが点灯したままになる)。
+                closed = recorder.stop_with_timeout(self._stop_timeout)
+                if not closed:
+                    timed_out = True
                 self._callbacks.on_error("エラー: 録音データがありません")
                 return
             _logger.info("finalize_recording 完了: %s", audio_file)

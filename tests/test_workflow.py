@@ -273,8 +273,9 @@ class TestRecordingWorkflowStopAndProcess:
         assert spy.done == []
         assert spy.record_only_done == []
         assert any("エラー" in msg for msg in spy.errors)
-        # 録音データがないと分かった時点で PortAudio の停止は試みない
-        assert recorder.stopped is False
+        # 録音データがなくても PortAudio ストリームは開いたままなので、
+        # マイクが点灯し続けないよう必ず停止処理を試みる
+        assert recorder.stopped is True
 
     def test_unexpected_exception_in_process_audio_is_reported(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
