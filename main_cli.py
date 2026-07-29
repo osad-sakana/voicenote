@@ -15,7 +15,7 @@ from rich.table import Table
 
 from config import InvalidConfigError, VoiceNoteConfig
 from logging_setup import setup_logging
-from pipeline import load_or_configure, save_wav, transcribe_and_save
+from pipeline import load_or_configure, transcribe_and_save
 from recorder import default_input_name, list_devices, record_audio
 
 console = Console()
@@ -121,17 +121,22 @@ def main():
     def on_stop():
         console.print("\n[yellow]録音を停止しています...[/yellow]")
 
+    def on_saved(path: Path):
+        console.print(f"[green]✓ 保存先: {path.name}[/green]")
+
     try:
-        audio_data = record_audio(device=args.device, on_start=on_start, on_stop=on_stop)
+        audio_file = record_audio(
+            device=args.device,
+            dest_dir=desktop,
+            on_start=on_start,
+            on_stop=on_stop,
+            on_saved=on_saved,
+        )
     except (ValueError, RuntimeError) as e:
         console.print(f"[red]エラー: {e}[/red]")
         sys.exit(1)
 
     console.print("[green]✓ 録音完了[/green]")
-
-    console.print("\n[cyan]Desktopに音声データを保存中...[/cyan]")
-    audio_file = save_wav(audio_data, desktop)
-    console.print(f"[green]✓ 保存完了: {audio_file.name}[/green]")
 
     if args.record_only:
         console.print(

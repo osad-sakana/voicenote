@@ -26,6 +26,7 @@ py-modules = [
     "main_cli",
     "config",
     "recorder",
+    "wav_writer",
     "transcriber",
     "note_writer",
     "formatter",

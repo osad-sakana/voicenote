@@ -2,10 +2,13 @@
 
 import threading
 import time
+import wave
+from pathlib import Path
 
 import numpy as np
+import pytest
 
-from recorder import ThreadedRecorder
+from recorder import SAMPLE_RATE, ThreadedRecorder
 
 
 class FakeStream:
@@ -27,6 +30,26 @@ class FakeStream:
 
     def close(self):
         self.close_called = True
+
+
+class FakeWriter:
+    """StreamingWavWriter の代わりに使うテスト用スタブ。"""
+
+    def __init__(self, dest_dir=None, sample_rate=SAMPLE_RATE):
+        self.path = Path("/tmp/fake_recording.wav")
+        self.frames = []
+        self.finalized = False
+        self.aborted = False
+
+    def write(self, chunk):
+        self.frames.append(chunk)
+
+    def finalize(self, timeout=2.0):
+        self.finalized = True
+        return self.path if self.frames else None
+
+    def abort(self):
+        self.aborted = True
 
 
 class TestStopWithTimeout:
@@ -78,19 +101,25 @@ class TestStopWithTimeout:
                 time.sleep(0.01)
             assert recorder.is_closing() is False
 
-    def test_data_survives_timeout(self):
-        """タイムアウトしてストリームを放棄しても、既に取得済みの録音データは失われない。"""
+    def test_finalized_recording_survives_timeout(self):
+        """タイムアウトしてストリームを放棄しても、既に確定済みの録音データは失われない。"""
         recorder = ThreadedRecorder()
         block = threading.Event()
         recorder._stream = FakeStream(block_event=block)
         recorder._running = True
-        recorder._data = [np.zeros((16000, 1), dtype=np.float32)]
+        writer = FakeWriter()
+        writer.write(np.zeros((16000, 1), dtype=np.float32))
+        recorder._writer = writer
+
+        audio_file = recorder.finalize_recording()
+        assert audio_file == writer.path
 
         try:
             result = recorder.stop_with_timeout(timeout=0.05)
             assert result is False
-            data = recorder.get_data()
-            assert len(data) == 16000
+            # finalize_recording は stop_with_timeout より前に完了しているため、
+            # ここでも取得済みのパスは変わらない
+            assert writer.finalized is True
         finally:
             block.set()
 
@@ -107,3 +136,84 @@ class TestStopWithTimeout:
         assert result is True
         assert stream.stop_called is True
         assert stream.close_called is True
+
+
+class TestThreadedRecorderStartStop:
+    def test_finalize_recording_returns_none_when_never_started(self):
+        recorder = ThreadedRecorder()
+        assert recorder.finalize_recording() is None
+
+    def test_callback_writes_to_writer_while_running(self):
+        recorder = ThreadedRecorder(writer_factory=lambda dest, rate: FakeWriter())
+        recorder._writer = FakeWriter()
+        recorder._running = True
+
+        chunk = np.zeros((160, 1), dtype=np.float32)
+        recorder._callback(chunk, 160, None, None)
+
+        assert recorder._writer.frames == [chunk]
+
+    def test_callback_is_noop_after_finalize(self):
+        """finalize 後 (stop 完了前) にコールバックが発火しても例外を送出しない。"""
+        recorder = ThreadedRecorder(writer_factory=lambda dest, rate: FakeWriter())
+        recorder._writer = FakeWriter()
+        recorder._running = True
+        recorder.finalize_recording()
+
+        chunk = np.zeros((160, 1), dtype=np.float32)
+        recorder._callback(chunk, 160, None, None)  # 例外を送出しないこと
+
+    def test_start_aborts_writer_when_stream_start_fails(self, tmp_path, monkeypatch):
+        import recorder as recorder_module
+
+        class FailingStream:
+            def __init__(self, *a, **kw):
+                pass
+
+            def start(self):
+                raise RuntimeError("デバイスが使用できません")
+
+        monkeypatch.setattr(recorder_module.sd, "InputStream", FailingStream)
+
+        aborted_writers = []
+
+        def writer_factory(dest, rate):
+            writer = FakeWriter(dest, rate)
+            original_abort = writer.abort
+
+            def abort():
+                aborted_writers.append(writer)
+                original_abort()
+
+            writer.abort = abort
+            return writer
+
+        recorder = ThreadedRecorder(dest_dir=tmp_path, writer_factory=writer_factory)
+
+        with pytest.raises(RuntimeError):
+            recorder.start()
+
+        assert len(aborted_writers) == 1
+        assert aborted_writers[0].aborted is True
+
+    def test_real_writer_produces_readable_wav_mid_recording(self, tmp_path):
+        """StreamingWavWriter を実際に使い、start() 直後の書き込みが
+        finalize() を待たずに有効な WAV として読めることを確認する
+        (受け入れ条件: stop() がハングしてもデータが失われない、の核心部分)。"""
+        recorder = ThreadedRecorder(dest_dir=tmp_path)
+        recorder._writer = recorder._writer_factory(tmp_path, SAMPLE_RATE)
+        recorder._running = True
+
+        chunk = np.zeros((SAMPLE_RATE, 1), dtype=np.float32)
+        recorder._callback(chunk, SAMPLE_RATE, None, None)
+
+        writer = recorder._writer
+        for _ in range(200):
+            if writer.frames_written >= SAMPLE_RATE:
+                break
+            time.sleep(0.01)
+
+        with wave.open(str(writer.path), "rb") as f:
+            assert f.getnframes() == SAMPLE_RATE
+
+        recorder.finalize_recording()

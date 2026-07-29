@@ -7,9 +7,11 @@ import logging
 import signal
 import threading
 from collections.abc import Callable
+from pathlib import Path
 
-import numpy as np
 import sounddevice as sd
+
+from wav_writer import StreamingWavWriter
 
 _logger = logging.getLogger("voicenote")
 
@@ -48,33 +50,52 @@ def resolve_device_id(device: str | None) -> int | None:
 class ThreadedRecorder:
     """
     GUI用スレッドセーフ録音クラス。
-    start() で録音開始、stop() で停止、get_data() でnumpy配列を取得。
+    start() で録音開始、stop() で停止、finalize_recording() でWAVファイルを確定する。
+
+    録音データはメモリに溜め込まず、コールバックで受け取った音声チャンクを
+    `StreamingWavWriter` 経由で逐次ディスクへ書き込む。これにより stop() が
+    ハングしても、それまでの録音データは既にディスク上の有効な WAV として残る。
     """
 
-    def __init__(self, device_id: int | None = None):
+    def __init__(
+        self,
+        device_id: int | None = None,
+        dest_dir: Path | None = None,
+        writer_factory: Callable[[Path, int], StreamingWavWriter] = StreamingWavWriter,
+    ):
         self._device_id = device_id
-        self._data: list[np.ndarray] = []
-        self._lock = threading.Lock()
+        self._dest_dir = dest_dir
+        self._writer_factory = writer_factory
+        self._writer: StreamingWavWriter | None = None
         self._stream: sd.InputStream | None = None
         self._running = False
         self._closer_thread: threading.Thread | None = None
 
     def _callback(self, indata, frames, time, status):
-        if self._running:
-            with self._lock:
-                self._data.append(indata.copy())
+        writer = self._writer
+        if self._running and writer is not None:
+            try:
+                writer.write(indata)
+            except Exception:
+                _logger.exception("録音コールバックでの書き込みに失敗しました")
 
     def start(self):
-        self._data = []
+        writer = self._writer_factory(self._dest_dir, SAMPLE_RATE)
+        try:
+            stream = sd.InputStream(
+                samplerate=SAMPLE_RATE,
+                channels=1,
+                dtype="float32",
+                device=self._device_id,
+                callback=self._callback,
+            )
+            stream.start()
+        except Exception:
+            writer.abort()
+            raise
+        self._writer = writer
+        self._stream = stream
         self._running = True
-        self._stream = sd.InputStream(
-            samplerate=SAMPLE_RATE,
-            channels=1,
-            dtype="float32",
-            device=self._device_id,
-            callback=self._callback,
-        )
-        self._stream.start()
 
     def stop(self):
         self._running = False
@@ -89,7 +110,7 @@ class ThreadedRecorder:
         PortAudio の stop()/close() が長時間ブロックする既知の問題（macOS）に対応するため、
         実際の停止処理は内部スレッドで行い、呼び出し元は最大 timeout 秒だけ待つ。
         タイムアウトした場合、ストリームは放棄され（例外送出中の可能性があるため触れない）、
-        以降 get_data() で録音済みデータを取得することはできる。
+        録音済みデータは finalize_recording() で既に確定済みのため影響を受けない。
 
         Returns:
             timeout 内に stop()/close() が完了すれば True、タイムアウトすれば False
@@ -120,28 +141,41 @@ class ThreadedRecorder:
         バックグラウンドでまだ完了していないかを返す。"""
         return self._closer_thread is not None and self._closer_thread.is_alive()
 
-    def get_data(self) -> np.ndarray:
-        with self._lock:
-            if not self._data:
-                raise RuntimeError("録音データがありません")
-            return np.concatenate(self._data, axis=0).flatten()
+    def finalize_recording(self, timeout: float = 2.0) -> Path | None:
+        """録音を確定し、WAVファイルのパスを返す。PortAudio の停止は待たない。
+
+        Returns:
+            1フレーム以上録音されていれば保存先パス、そうでなければ None。
+        """
+        self._running = False
+        writer = self._writer
+        self._writer = None
+        if writer is None:
+            return None
+        return writer.finalize(timeout)
 
 
 def record_audio(
     device: str | None = None,
+    dest_dir: Path | None = None,
     on_start: Callable[[str], None] | None = None,
     on_stop: Callable[[], None] | None = None,
-) -> np.ndarray:
+    on_saved: Callable[[Path], None] | None = None,
+) -> Path:
     """
     音声を録音する（CLI用・Ctrl+Cで停止）
 
     Args:
         device: 入力デバイス名またはID（Noneの場合はデフォルト）
+        dest_dir: 録音WAVファイルの保存先ディレクトリ
         on_start: 録音開始時に解決済みデバイス名を受け取るコールバック
         on_stop: Ctrl+C受信（録音停止処理開始）時に呼ばれるコールバック
+        on_saved: 録音データがWAVファイルとして確定した直後に呼ばれるコールバック。
+            PortAudio の停止処理がハングしても、この時点で既にファイルは
+            ディスク上に存在する。
 
     Returns:
-        録音された音声データ（float32のnumpy配列）
+        保存されたWAVファイルのパス
 
     Raises:
         ValueError: デバイスが見つからない場合
@@ -149,7 +183,7 @@ def record_audio(
     """
     device_id = resolve_device_id(device)
 
-    recorder = ThreadedRecorder(device_id)
+    recorder = ThreadedRecorder(device_id, dest_dir)
     stop_event = threading.Event()
 
     def _signal_handler(sig, frame):
@@ -165,6 +199,12 @@ def record_audio(
 
     recorder.start()
     stop_event.wait()
+    audio_file = recorder.finalize_recording()
+    if audio_file is None:
+        recorder.stop()
+        raise RuntimeError("録音データがありません")
+    if on_saved:
+        on_saved(audio_file)
     recorder.stop()
 
-    return recorder.get_data()
+    return audio_file

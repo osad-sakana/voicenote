@@ -46,10 +46,11 @@ Dependencies are managed in `pyproject.toml`. Use `uv sync` to install dependenc
 
 - **main.py**: GUI entry point (CustomTkinter)
 - **main_cli.py**: CLI entry point (Rich)
-- **pipeline.py**: Shared business logic — `load_or_configure`, `save_wav`, `transcribe_and_save`
+- **pipeline.py**: Shared business logic — `load_or_configure`, `transcribe_and_save`
 - **logging_setup.py**: Logging initialization (shared by GUI and CLI)
 - **config.py**: Handles config.json persistence and interactive setup via rich prompts
-- **recorder.py**: Real-time audio recording with SIGINT handling for Ctrl+C stop
+- **recorder.py**: Real-time audio recording with SIGINT handling for Ctrl+C stop. `ThreadedRecorder` streams chunks straight to disk via `wav_writer.py` instead of buffering them in memory
+- **wav_writer.py**: `StreamingWavWriter` — opens a WAV file when recording starts and writes chunks to it incrementally on a background thread, so the file stays valid (playable) even if the recording is interrupted before a clean stop
 - **transcriber.py**: Whisper model loading and transcription with progress indicators
 - **formatter.py**: Rule-based and LLM-based transcription text formatting
 - **note_writer.py**: Markdown note file generation with YAML frontmatter (Obsidian-compatible)
@@ -61,12 +62,12 @@ Both GUI (`main.py`) and CLI (`main_cli.py`) delegate the core workflow to `pipe
 
 **Recording Mode (default)**:
 1. **Configuration Phase**: entry → `pipeline.load_or_configure` → `config.json`
-2. **Recording Phase**: entry → `recorder.py` (sounddevice stream with callback) → numpy array
-3. **WAV Save Phase**: entry → `pipeline.save_wav` → WAV file at `~/Desktop/YYYY-MM-DD_HHMMSS_recording.wav` (CLI) or selected folder (GUI)
+2. **Recording Phase**: entry → `recorder.ThreadedRecorder.start()` opens a `wav_writer.StreamingWavWriter` at `~/Desktop/YYYY-MM-DD_HHMMSS_recording.wav` (CLI) or the selected folder (GUI), then streams each sounddevice callback chunk to it incrementally — the WAV file is valid on disk throughout the recording, not just after it ends
+3. **Finalize Phase**: entry → `recorder.ThreadedRecorder.finalize_recording()` closes the WAV file and returns its path. This happens *before* `stop_with_timeout()` (which stops the PortAudio stream) so a hang in stream shutdown can no longer lose recorded audio
 4. **Transcribe + Note Save Phase**: entry → `pipeline.transcribe_and_save` → `transcriber.py` → `formatter.py` (optional) → `note_writer.save_transcript` → `{save_folder}/YYYY-MM-DD_HHMMSS_raw.md`
 
 **Record-Only Mode (CLI `--record-only` / GUI "録音だけする")**:
-1. Configuration → recording → WAV save (steps 1–3 above)
+1. Configuration → recording → finalize (steps 1–3 above)
 2. Transcription is skipped
 
 **File Mode (CLI `--file` / GUI "文字起こしだけする")**:
@@ -76,9 +77,9 @@ Both GUI (`main.py`) and CLI (`main_cli.py`) delegate the core workflow to `pipe
 
 ### Important Implementation Details
 
-- **Audio Format**: Recording is float32 mono at 16kHz (SAMPLE_RATE constant in recorder.py)
-- **Signal Handling**: recorder.py uses global state (_is_recording, _recording_data) with SIGINT handler for graceful Ctrl+C shutdown
-- **Audio File Storage**: Recorded WAV files are always saved to Desktop with format `YYYY-MM-DD_HHMMSS_recording.wav`
+- **Audio Format**: Recording is captured as float32 mono at 16kHz (SAMPLE_RATE constant in recorder.py) and converted to int16 by `wav_writer.float32_to_int16` before being written
+- **Signal Handling**: recorder.py's `record_audio()` installs a SIGINT handler for graceful Ctrl+C shutdown; recording state lives on the `ThreadedRecorder` instance, not module globals
+- **Audio File Storage**: Recorded WAV files are always saved to Desktop with format `YYYY-MM-DD_HHMMSS_recording.wav` (or `_2`, `_3`, ... if a file with that timestamp already exists). The timestamp reflects when recording *started*, not when it was saved
 - **Transcription Modes**: `local` (faster-whisper, CPU, int8) or `openai` (Whisper API). Mode selected via `--config` when `OPENAI_API_KEY` is set.
 - **Whisper Configuration**: Local mode uses CPU device with int8 compute_type, auto language detection, beam_size=5. OpenAI mode uses whisper-1 model with 25MB file size limit.
 - **Transcription Output**: Markdown files named `YYYY-MM-DD_HHMMSS_raw.md` with YAML frontmatter containing created timestamp, type=transcription, tags=[recording, raw]

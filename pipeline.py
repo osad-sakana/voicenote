@@ -1,21 +1,16 @@
 """
 GUI/CLI 共通の業務ロジックモジュール。
 
-`save_wav`、`load_or_configure`、`transcribe_and_save` を提供し、
+`load_or_configure`、`transcribe_and_save` を提供し、
 エントリーポイント (`main.py` / `main_cli.py`) からは UI に集中できるようにする。
 """
 
 from collections.abc import Callable
-from datetime import datetime
 from pathlib import Path
-
-import numpy as np
-from scipy.io import wavfile
 
 from config import CONFIG_PATH, VoiceNoteConfig, configure_interactive, load_config, save_config
 from formatter import format_transcription
 from note_writer import save_transcript
-from recorder import SAMPLE_RATE
 from transcriber import transcribe
 
 
@@ -45,20 +40,6 @@ def load_or_configure(
         config = VoiceNoteConfig()
 
     return config
-
-
-def save_wav(audio_data: np.ndarray, dest_dir: Path) -> Path:
-    """録音データを `dest_dir/YYYY-MM-DD_HHMMSS_recording.wav` として保存する。
-
-    float32 (-1.0〜1.0) を int16 に変換して書き出す。
-    """
-    dest_dir = Path(dest_dir)
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-    audio_file = dest_dir / f"{timestamp}_recording.wav"
-    audio_int16 = (audio_data * 32767).astype(np.int16)
-    wavfile.write(audio_file, SAMPLE_RATE, audio_int16)
-    return audio_file
 
 
 def transcribe_and_save(
