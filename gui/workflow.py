@@ -16,10 +16,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-import numpy as np
-
 from config import VoiceNoteConfig
-from pipeline import save_wav, transcribe_and_save
+from pipeline import transcribe_and_save
 from recorder import STREAM_STOP_TIMEOUT_SEC, ThreadedRecorder
 
 from .constants import MODE_RECORD_ONLY, MODE_RECORD_TRANSCRIBE
@@ -63,7 +61,7 @@ class RecordingWorkflow:
         self,
         config: VoiceNoteConfig,
         callbacks: WorkflowCallbacks,
-        recorder_factory: Callable[[int | None], ThreadedRecorder] = ThreadedRecorder,
+        recorder_factory: Callable[[int | None, Path], ThreadedRecorder] = ThreadedRecorder,
         log_file: Path | None = None,
         stop_timeout: float = STREAM_STOP_TIMEOUT_SEC,
         thread_factory: Callable[..., threading.Thread] = threading.Thread,
@@ -90,7 +88,7 @@ class RecordingWorkflow:
     def update_config(self, config: VoiceNoteConfig) -> None:
         self._config = config
 
-    def start(self, device_id: int | None, device_label: str) -> str | None:
+    def start(self, device_id: int | None, device_label: str, rec_dest: Path) -> str | None:
         """録音を開始する。失敗時はエラーメッセージを返す。"""
         if self._stopping:
             return (
@@ -124,7 +122,7 @@ class RecordingWorkflow:
             self._pending_close_recorder = None
             self._pending_close_since = None
 
-        recorder = self._recorder_factory(device_id)
+        recorder = self._recorder_factory(device_id, rec_dest)
         try:
             recorder.start()
         except Exception as e:
@@ -138,8 +136,8 @@ class RecordingWorkflow:
         self._thread_factory(target=self._timer_loop, daemon=True).start()
         return None
 
-    def stop_and_process(self, rec_dest: Path, mode: str) -> None:
-        """録音を停止し、WAV保存 → (必要なら) 文字起こしをバックグラウンドスレッドで実行する。
+    def stop_and_process(self, mode: str) -> None:
+        """録音を停止し、WAV確定 → (必要なら) 文字起こしをバックグラウンドスレッドで実行する。
 
         `ThreadedRecorder.stop_with_timeout()` (延いては PortAudio の stop()/close()) が
         長時間ブロックすることがあるため、停止処理そのものをバックグラウンドスレッドに
@@ -153,11 +151,11 @@ class RecordingWorkflow:
 
         self._stopping = True
         self._callbacks.on_status("保存中...")
-        self._callbacks.on_log("録音停止 → ストリームを閉じています...")
+        self._callbacks.on_log("録音停止 → 録音データを確定しています...")
 
         try:
             self._thread_factory(
-                target=self._stop_and_process_worker, args=(recorder, rec_dest, mode), daemon=True
+                target=self._stop_and_process_worker, args=(recorder, mode), daemon=True
             ).start()
         except Exception:
             # スレッド生成自体に失敗すると _stopping が固着し、以降ずっと
@@ -166,35 +164,46 @@ class RecordingWorkflow:
             _logger.error("停止ワーカーの起動に失敗:\n%s", traceback.format_exc())
             self._callbacks.on_error("予期せぬエラーが発生しました（停止処理を開始できません）")
 
-    def _stop_and_process_worker(self, recorder: ThreadedRecorder, rec_dest: Path, mode: str):
+    def _stop_and_process_worker(self, recorder: ThreadedRecorder, mode: str):
         # UIキュー経由のコールバックはメインスレッドが応答しないと反映されないため、
         # 万一メインスレッド側がハングした場合の切り分け用に直接ログも残す。
-        _logger.info("停止ワーカー開始: stop_with_timeout(%s) を呼び出します", self._stop_timeout)
+        #
+        # finalize_recording() を stop_with_timeout() より先に呼ぶのが本モジュールの
+        # 核心: PortAudio の stop()/close() がハングしても (#19)、その手前で
+        # WAVファイルは既にディスク上に確定させておく。順序を逆にすると、
+        # ハングした stop() がファイル確定そのものを道連れにしてしまい、
+        # このメソッドの存在意義がなくなる。
+        _logger.info("停止ワーカー開始: finalize_recording() を呼び出します")
         timed_out = False
         try:
+            audio_file = recorder.finalize_recording()
+            if audio_file is None:
+                _logger.warning("finalize_recording: 録音データがありません")
+                # 録音データがなくても PortAudio ストリームは開いたままなので、
+                # ここで確実に閉じておく (放置するとマイクが点灯したままになる)。
+                closed = recorder.stop_with_timeout(self._stop_timeout)
+                if not closed:
+                    timed_out = True
+                self._callbacks.on_error("エラー: 録音データがありません")
+                return
+            _logger.info("finalize_recording 完了: %s", audio_file)
+            self._callbacks.on_log(f"音声ファイルを保存: {audio_file.name}")
+
             closed = recorder.stop_with_timeout(self._stop_timeout)
             _logger.info("stop_with_timeout 完了 (closed=%s)", closed)
             if closed:
-                self._callbacks.on_log("ストリームを閉じました。データを結合中...")
+                self._callbacks.on_log("ストリームを閉じました")
             else:
                 timed_out = True
                 _logger.warning(
                     "ストリームの停止がタイムアウトしました（%s秒）", self._stop_timeout
                 )
                 self._callbacks.on_log(
-                    "ストリームの停止がタイムアウトしました。録音データの保存を続行します"
+                    "ストリームの停止がタイムアウトしました。録音データは既に保存済みです"
                 )
-            try:
-                audio_data = recorder.get_data()
-            except RuntimeError as e:
-                _logger.warning("get_data 失敗: %s", e)
-                self._callbacks.on_error(f"エラー: {e}")
-                return
-            _logger.info("get_data 完了 (%d サンプル)", len(audio_data))
-            self._callbacks.on_log(f"録音データ取得完了 ({len(audio_data) / 16000:.1f}秒)")
 
             self._callbacks.on_processing_started()
-            self._process_audio(audio_data, rec_dest, mode)
+            self._process_audio(audio_file, mode)
         except Exception:
             _logger.error("_stop_and_process_worker で未捕捉の例外:\n%s", traceback.format_exc())
             log_name = self._log_file.name if self._log_file else "ログファイル"
@@ -235,6 +244,14 @@ class RecordingWorkflow:
         if recorder is None:
             return
 
+        # PortAudio の停止を待つ前に、ここまでの録音データを確定させておく
+        # (finalize_recording は書き込みスレッドの join を伴うが、通常は
+        # 即座に完了するため、この後の join(1.0) の猶予を大きく削らない)。
+        with contextlib.suppress(Exception):
+            audio_file = recorder.finalize_recording(timeout=1.0)
+            if audio_file is not None:
+                _logger.info("終了時に録音データを確定しました: %s", audio_file)
+
         def _stop():
             with contextlib.suppress(Exception):
                 recorder.stop_with_timeout(self._stop_timeout)
@@ -255,16 +272,8 @@ class RecordingWorkflow:
             time.sleep(1)
             self._elapsed += 1
 
-    def _process_audio(self, audio_data: np.ndarray, rec_dest: Path, mode: str):
+    def _process_audio(self, audio_file: Path, mode: str):
         try:
-            self._callbacks.on_log(f"WAVファイルを書き込み中... → {rec_dest}")
-            try:
-                audio_file = save_wav(audio_data, rec_dest)
-                self._callbacks.on_log(f"音声ファイルを保存: {audio_file.name}")
-            except Exception as e:
-                self._callbacks.on_error(f"エラー: {e}")
-                return
-
             if mode == MODE_RECORD_ONLY:
                 self._callbacks.on_log(f"録音完了 → {audio_file}")
                 self._callbacks.on_record_only_done(audio_file)

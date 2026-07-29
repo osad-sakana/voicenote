@@ -159,16 +159,16 @@ class App(ctk.CTk):
 
         device_label = self._device_var.get()
         device_id = parse_device_id(device_label)
-        error_message = self._workflow.start(device_id, device_label)
+        rec_dest = Path(self._rec_dest_entry.get().strip() or str(Path.home() / "Desktop"))
+        error_message = self._workflow.start(device_id, device_label, rec_dest)
         if error_message:
             messagebox.showerror("録音エラー", error_message)
 
     def _stop_recording(self):
         self._set_processing(True)
         self._exec_btn.configure(text="実行", fg_color=PRIMARY_BUTTON_COLOR)
-        rec_dest = Path(self._rec_dest_entry.get().strip() or str(Path.home() / "Desktop"))
         mode = self._mode_var.get()
-        self._workflow.stop_and_process(rec_dest, mode)
+        self._workflow.stop_and_process(mode)
 
     def _run_transcribe_only(self):
         audio_path = self._file_entry.get().strip()
@@ -184,6 +184,9 @@ class App(ctk.CTk):
 
     def _on_recording_started(self):
         self._exec_btn.configure(text="録音停止", fg_color="red")
+        # 保存先は録音開始時にファイルへ確定されるため、録音中の変更は
+        # 反映されない。誤解を避けるため録音中は編集不可にする。
+        self._rec_dest_entry.configure(state="disabled")
 
     def _on_processing_started(self):
         self._set_processing(True)
