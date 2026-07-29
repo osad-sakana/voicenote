@@ -25,6 +25,13 @@ class TestFloat32ToInt16:
         assert int(data[2]) == 32767
         assert int(data[3]) == -32767
 
+    def test_clips_out_of_range_values_instead_of_wrapping(self):
+        # |x| > 1.0 はラップアラウンドせずクリップされる
+        audio = np.array([1.2, -1.2], dtype=np.float32)
+        data = float32_to_int16(audio)
+        assert int(data[0]) == 32767
+        assert int(data[1]) == -32768
+
 
 class TestStreamingWavWriter:
     def test_creates_dest_dir_if_missing(self, tmp_path: Path):
@@ -93,6 +100,30 @@ class TestStreamingWavWriter:
         second = writer.finalize()
 
         assert first == second
+
+    def test_finalize_is_idempotent_after_timeout(self, tmp_path: Path):
+        """1回目の finalize() がタイムアウトしてファイルを放棄した後、2回目の
+        呼び出しが同じ結果を返し、ファイルにも一切触れない (unlink しない) こと。"""
+        writer = StreamingWavWriter(tmp_path, SAMPLE_RATE)
+        block = threading.Event()
+        original_writeframes = writer._wav.writeframes
+
+        def blocking_writeframes(data):
+            block.wait(timeout=5)
+            original_writeframes(data)
+
+        writer._wav.writeframes = blocking_writeframes
+        writer.write(np.zeros(SAMPLE_RATE, dtype=np.float32))
+
+        try:
+            first = writer.finalize(timeout=0.05)
+            second = writer.finalize(timeout=0.05)
+
+            assert first == second == writer.path
+            assert writer.path.exists()
+        finally:
+            block.set()
+            writer._thread.join(timeout=2.0)
 
     def test_no_callback_after_finalize_raises(self, tmp_path: Path):
         """finalize 後に write() を呼んでも例外を送出しない

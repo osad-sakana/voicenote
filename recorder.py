@@ -51,7 +51,8 @@ def resolve_device_id(device: str | None) -> int | None:
 class ThreadedRecorder:
     """
     GUI用スレッドセーフ録音クラス。
-    start() で録音開始、stop() で停止、finalize_recording() でWAVファイルを確定する。
+    start() で録音開始、finalize_recording() でWAVファイルを確定し、
+    stop_with_timeout() でストリームを停止する。
 
     録音データはメモリに溜め込まず、コールバックで受け取った音声チャンクを
     `StreamingWavWriter` 経由で逐次ディスクへ書き込む。これにより stop() が
@@ -107,16 +108,9 @@ class ThreadedRecorder:
             raise
         self._stream = stream
 
-    def stop(self):
-        self._running = False
-        if self._stream is not None:
-            self._stream.stop()
-            self._stream.close()
-            self._stream = None
-
     def stop_with_timeout(self, timeout: float = STREAM_STOP_TIMEOUT_SEC) -> bool:
         """
-        stop() をタイムアウト付きで実行する。
+        PortAudio ストリームをタイムアウト付きで停止する。
         PortAudio の stop()/close() が長時間ブロックする既知の問題（macOS）に対応するため、
         実際の停止処理は内部スレッドで行い、呼び出し元は最大 timeout 秒だけ待つ。
         タイムアウトした場合、ストリームは放棄され（例外送出中の可能性があるため触れない）、

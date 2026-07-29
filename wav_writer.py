@@ -31,8 +31,11 @@ _SENTINEL = object()
 
 
 def float32_to_int16(data: np.ndarray) -> np.ndarray:
-    """float32 (-1.0〜1.0) の音声データを int16 に変換する。"""
-    return (data * 32767).astype(np.int16)
+    """float32 (-1.0〜1.0) の音声データを int16 に変換する。
+
+    範囲外の入力 (|x| > 1.0) は int16 でラップアラウンドしないようクリップする。
+    """
+    return np.clip(data * 32767.0, -32768, 32767).astype(np.int16)
 
 
 def _resolve_unique_path(dest_dir: Path, timestamp: str) -> Path:
@@ -62,6 +65,7 @@ class StreamingWavWriter:
         self._lock = threading.Lock()
         self._frames_written = 0
         self._finalized = False
+        self._finalize_result: Path | None = None
         self._stopping = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
@@ -106,7 +110,8 @@ class StreamingWavWriter:
             return self._frames_written
 
     def finalize(self, timeout: float = 2.0) -> Path | None:
-        """書き込みスレッドを止めてファイルを確定する。冪等。
+        """書き込みスレッドを止めてファイルを確定する。冪等
+        (2回目以降は1回目の結果をそのまま返し、ファイルには触れない)。
 
         Returns:
             1フレーム以上書き込まれていれば保存先パス、0フレームなら
@@ -115,32 +120,37 @@ class StreamingWavWriter:
         with self._lock:
             already_finalized = self._finalized
             self._finalized = True
+            if already_finalized:
+                return self._finalize_result
 
-        if not already_finalized:
-            self._stopping.set()
-            with contextlib.suppress(queue.Full):
-                self._queue.put_nowait(_SENTINEL)
-            self._thread.join(timeout)
-            if self._thread.is_alive():
-                # 書き込みスレッドがまだ writeframes() の途中である可能性がある。
-                # ここで close() すると seek が交錯しヘッダーを壊しかねないため、
-                # ハンドルは解放せず放棄する。最後に成功した writeframes() の時点で
-                # 既にディスク上のヘッダーは有効なので、ファイル自体は失われない。
-                # 同じ理由でファイルの unlink も行わない (これから書かれるかも
-                # しれないファイルを消してしまうため)。
-                _logger.warning(
-                    "WAV書き込みスレッドがタイムアウトしました（%s秒）。"
-                    "ファイルハンドルは解放せず放棄します",
-                    timeout,
-                )
-                return self.path
-            with contextlib.suppress(Exception):
-                self._wav.close()
+        self._stopping.set()
+        with contextlib.suppress(queue.Full):
+            self._queue.put_nowait(_SENTINEL)
+        self._thread.join(timeout)
+        if self._thread.is_alive():
+            # 書き込みスレッドがまだ writeframes() の途中である可能性がある。
+            # ここで close() すると seek が交錯しヘッダーを壊しかねないため、
+            # ハンドルは解放せず放棄する。最後に成功した writeframes() の時点で
+            # 既にディスク上のヘッダーは有効なので、ファイル自体は失われない。
+            # 同じ理由でファイルの unlink も行わない (これから書かれるかも
+            # しれないファイルを消してしまうため)。
+            _logger.warning(
+                "WAV書き込みスレッドがタイムアウトしました（%s秒）。"
+                "ファイルハンドルは解放せず放棄します",
+                timeout,
+            )
+            self._finalize_result = self.path
+            return self._finalize_result
+
+        with contextlib.suppress(Exception):
+            self._wav.close()
 
         if self.frames_written == 0:
             self.path.unlink(missing_ok=True)
-            return None
-        return self.path
+            self._finalize_result = None
+        else:
+            self._finalize_result = self.path
+        return self._finalize_result
 
     def abort(self) -> None:
         """録音開始に失敗した際、オープン済みファイルを破棄する。"""
