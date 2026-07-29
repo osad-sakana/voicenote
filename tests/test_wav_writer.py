@@ -1,6 +1,8 @@
 """wav_writer.StreamingWavWriter のユニットテスト。"""
 
 import re
+import threading
+import time
 import wave
 from pathlib import Path
 
@@ -131,6 +133,64 @@ class TestStreamingWavWriter:
 
         assert not path.exists()
         assert not writer._thread.is_alive()
+
+    def test_finalize_timeout_does_not_close_handle_while_thread_busy(self, tmp_path: Path):
+        """書き込みスレッドが writeframes() でまだ動いている間に finalize() が
+        タイムアウトした場合、close() を呼んで seek と競合させてはならない。"""
+        writer = StreamingWavWriter(tmp_path, SAMPLE_RATE)
+        block = threading.Event()
+        close_calls: list[bool] = []
+        original_writeframes = writer._wav.writeframes
+        original_close = writer._wav.close
+
+        def blocking_writeframes(data):
+            block.wait(timeout=5)
+            original_writeframes(data)
+
+        def tracking_close():
+            close_calls.append(True)
+            original_close()
+
+        writer._wav.writeframes = blocking_writeframes
+        writer._wav.close = tracking_close
+
+        writer.write(np.zeros(SAMPLE_RATE, dtype=np.float32))
+        try:
+            writer.finalize(timeout=0.05)
+            assert close_calls == []
+            assert writer._thread.is_alive()
+        finally:
+            block.set()
+            writer._thread.join(timeout=2.0)
+
+    def test_queue_full_drops_chunk_without_raising(self, tmp_path: Path, monkeypatch):
+        """書き込みスレッドが詰まりキューが満杯でも write() は例外を送出せず、
+        メモリ (キューサイズ) が録音長に比例して増え続けない。"""
+        import wav_writer
+
+        monkeypatch.setattr(wav_writer, "_MAX_QUEUE_SIZE", 1)
+        writer = wav_writer.StreamingWavWriter(tmp_path, SAMPLE_RATE)
+
+        block = threading.Event()
+        original_writeframes = writer._wav.writeframes
+
+        def blocking_writeframes(data):
+            block.wait(timeout=5)
+            original_writeframes(data)
+
+        writer._wav.writeframes = blocking_writeframes
+
+        try:
+            writer.write(np.zeros(10, dtype=np.float32))
+            for _ in range(100):  # スレッドがこの1件を取り出し writeframes でブロックするまで待つ
+                if writer._queue.empty():
+                    break
+                time.sleep(0.01)
+            writer.write(np.zeros(10, dtype=np.float32))  # キュー(maxsize=1)に積まれる
+            writer.write(np.zeros(10, dtype=np.float32))  # キュー満杯 → 破棄されるだけで例外なし
+        finally:
+            block.set()
+            writer.finalize(timeout=2.0)
 
 
 class _FixedNow:

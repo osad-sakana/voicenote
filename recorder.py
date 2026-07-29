@@ -3,6 +3,7 @@
 sounddeviceを使用したリアルタイム録音
 """
 
+import contextlib
 import logging
 import signal
 import threading
@@ -80,7 +81,13 @@ class ThreadedRecorder:
                 _logger.exception("録音コールバックでの書き込みに失敗しました")
 
     def start(self):
-        writer = self._writer_factory(self._dest_dir, SAMPLE_RATE)
+        dest_dir = self._dest_dir if self._dest_dir is not None else Path.home() / "Desktop"
+        writer = self._writer_factory(dest_dir, SAMPLE_RATE)
+        # コールバックが _writer/_running を見た瞬間から書き込めるよう、
+        # stream.start() より前に代入しておく（取りこぼし窓をなくす）。
+        self._writer = writer
+        self._running = True
+        stream = None
         try:
             stream = sd.InputStream(
                 samplerate=SAMPLE_RATE,
@@ -91,11 +98,14 @@ class ThreadedRecorder:
             )
             stream.start()
         except Exception:
+            self._writer = None
+            self._running = False
+            if stream is not None:
+                with contextlib.suppress(Exception):
+                    stream.close()
             writer.abort()
             raise
-        self._writer = writer
         self._stream = stream
-        self._running = True
 
     def stop(self):
         self._running = False
@@ -199,12 +209,14 @@ def record_audio(
 
     recorder.start()
     stop_event.wait()
+    # finalize_recording() を stop_with_timeout() より先に呼ぶ: PortAudio の
+    # 停止処理がハングしても (#19)、その手前でファイルを確定させておく。
     audio_file = recorder.finalize_recording()
     if audio_file is None:
-        recorder.stop()
+        recorder.stop_with_timeout()
         raise RuntimeError("録音データがありません")
     if on_saved:
         on_saved(audio_file)
-    recorder.stop()
+    recorder.stop_with_timeout()
 
     return audio_file

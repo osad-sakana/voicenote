@@ -138,42 +138,85 @@ class TestStopWithTimeout:
         assert stream.close_called is True
 
 
+class FakeInputStream:
+    """sd.InputStream の代わりに使うテスト用スタブ。
+
+    実際の start() 経路を通して駆動できるよう、コンストラクタで受け取った
+    callback をテスト側から手動で呼び出せるようにしている。
+    """
+
+    last_instance: "FakeInputStream | None" = None
+
+    def __init__(self, samplerate, channels, dtype, device, callback):
+        self.callback = callback
+        self.started = False
+        self.stopped = False
+        self.closed = False
+        FakeInputStream.last_instance = self
+
+    def start(self):
+        self.started = True
+
+    def stop(self):
+        self.stopped = True
+
+    def close(self):
+        self.closed = True
+
+
+class FailingInputStream:
+    def __init__(self, *a, **kw):
+        pass
+
+    def start(self):
+        raise RuntimeError("デバイスが使用できません")
+
+
 class TestThreadedRecorderStartStop:
     def test_finalize_recording_returns_none_when_never_started(self):
         recorder = ThreadedRecorder()
         assert recorder.finalize_recording() is None
 
-    def test_callback_writes_to_writer_while_running(self):
-        recorder = ThreadedRecorder(writer_factory=lambda dest, rate: FakeWriter())
-        recorder._writer = FakeWriter()
-        recorder._running = True
+    def test_callback_writes_to_writer_via_real_start(self, tmp_path, monkeypatch):
+        """recorder.start() を実際に呼び、start() が組み立てた _writer/_running
+        の状態でコールバックが正しく書き込みへ届くことを検証する
+        (start() 内の代入順序が壊れていないかの回帰チェック)。"""
+        import recorder as recorder_module
+
+        monkeypatch.setattr(recorder_module.sd, "InputStream", FakeInputStream)
+        writer_holder: dict[str, FakeWriter] = {}
+
+        def writer_factory(dest, rate):
+            writer = FakeWriter(dest, rate)
+            writer_holder["writer"] = writer
+            return writer
+
+        recorder = ThreadedRecorder(dest_dir=tmp_path, writer_factory=writer_factory)
+        recorder.start()
 
         chunk = np.zeros((160, 1), dtype=np.float32)
-        recorder._callback(chunk, 160, None, None)
+        FakeInputStream.last_instance.callback(chunk, 160, None, None)
 
-        assert recorder._writer.frames == [chunk]
+        assert writer_holder["writer"].frames == [chunk]
 
-    def test_callback_is_noop_after_finalize(self):
+    def test_callback_is_noop_after_finalize(self, tmp_path, monkeypatch):
         """finalize 後 (stop 完了前) にコールバックが発火しても例外を送出しない。"""
-        recorder = ThreadedRecorder(writer_factory=lambda dest, rate: FakeWriter())
-        recorder._writer = FakeWriter()
-        recorder._running = True
+        import recorder as recorder_module
+
+        monkeypatch.setattr(recorder_module.sd, "InputStream", FakeInputStream)
+        recorder = ThreadedRecorder(
+            dest_dir=tmp_path, writer_factory=lambda dest, rate: FakeWriter(dest, rate)
+        )
+        recorder.start()
         recorder.finalize_recording()
 
         chunk = np.zeros((160, 1), dtype=np.float32)
-        recorder._callback(chunk, 160, None, None)  # 例外を送出しないこと
+        FakeInputStream.last_instance.callback(chunk, 160, None, None)  # 例外を送出しないこと
 
     def test_start_aborts_writer_when_stream_start_fails(self, tmp_path, monkeypatch):
         import recorder as recorder_module
 
-        class FailingStream:
-            def __init__(self, *a, **kw):
-                pass
-
-            def start(self):
-                raise RuntimeError("デバイスが使用できません")
-
-        monkeypatch.setattr(recorder_module.sd, "InputStream", FailingStream)
+        monkeypatch.setattr(recorder_module.sd, "InputStream", FailingInputStream)
 
         aborted_writers = []
 
@@ -195,17 +238,22 @@ class TestThreadedRecorderStartStop:
 
         assert len(aborted_writers) == 1
         assert aborted_writers[0].aborted is True
+        # start() 失敗後は次の start() が再度使えるよう、状態が残っていないこと
+        assert recorder._writer is None
+        assert recorder._running is False
 
-    def test_real_writer_produces_readable_wav_mid_recording(self, tmp_path):
-        """StreamingWavWriter を実際に使い、start() 直後の書き込みが
+    def test_real_writer_produces_readable_wav_mid_recording(self, tmp_path, monkeypatch):
+        """StreamingWavWriter を実際に使い、recorder.start() 経由のコールバックが
         finalize() を待たずに有効な WAV として読めることを確認する
         (受け入れ条件: stop() がハングしてもデータが失われない、の核心部分)。"""
+        import recorder as recorder_module
+
+        monkeypatch.setattr(recorder_module.sd, "InputStream", FakeInputStream)
         recorder = ThreadedRecorder(dest_dir=tmp_path)
-        recorder._writer = recorder._writer_factory(tmp_path, SAMPLE_RATE)
-        recorder._running = True
+        recorder.start()
 
         chunk = np.zeros((SAMPLE_RATE, 1), dtype=np.float32)
-        recorder._callback(chunk, SAMPLE_RATE, None, None)
+        FakeInputStream.last_instance.callback(chunk, SAMPLE_RATE, None, None)
 
         writer = recorder._writer
         for _ in range(200):

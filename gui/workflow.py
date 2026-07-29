@@ -243,7 +243,9 @@ class RecordingWorkflow:
         # (finalize_recording は書き込みスレッドの join を伴うが、通常は
         # 即座に完了するため、この後の join(1.0) の猶予を大きく削らない)。
         with contextlib.suppress(Exception):
-            recorder.finalize_recording(timeout=1.0)
+            audio_file = recorder.finalize_recording(timeout=1.0)
+            if audio_file is not None:
+                _logger.info("終了時に録音データを確定しました: %s", audio_file)
 
         def _stop():
             with contextlib.suppress(Exception):

@@ -122,7 +122,7 @@ def main():
         console.print("\n[yellow]録音を停止しています...[/yellow]")
 
     def on_saved(path: Path):
-        console.print(f"[green]✓ 保存先: {path.name}[/green]")
+        console.print(f"[green]✓ 保存先: {path.absolute()}[/green]")
 
     try:
         audio_file = record_audio(

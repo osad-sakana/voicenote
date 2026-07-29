@@ -23,6 +23,10 @@ import numpy as np
 _logger = logging.getLogger("voicenote")
 
 SAMPLE_WIDTH = 2  # int16
+# 書き込みスレッドがディスクI/Oで詰まった場合でもキューが録音長に比例して
+# 増え続けない上限。16kHz mono では 1 チャンクは通常数十ms分なので、
+# 数百個の余裕があれば実用上のI/O遅延は十分吸収できる。
+_MAX_QUEUE_SIZE = 500
 _SENTINEL = object()
 
 
@@ -54,7 +58,7 @@ class StreamingWavWriter:
         self._wav.setsampwidth(SAMPLE_WIDTH)
         self._wav.setframerate(sample_rate)
 
-        self._queue: queue.Queue = queue.Queue()
+        self._queue: queue.Queue = queue.Queue(maxsize=_MAX_QUEUE_SIZE)
         self._lock = threading.Lock()
         self._frames_written = 0
         self._finalized = False
@@ -74,8 +78,16 @@ class StreamingWavWriter:
                 _logger.exception("WAV書き込み中にエラーが発生しました")
 
     def write(self, chunk: np.ndarray) -> None:
-        """録音コールバックから呼ばれる。キューに積むだけで即座に返る。"""
-        self._queue.put_nowait(float32_to_int16(chunk))
+        """録音コールバックから呼ばれる。キューに積むだけで即座に返る。
+
+        書き込みスレッドがディスクI/Oで詰まりキューが満杯の場合、メモリが
+        録音長に比例して増え続けないよう、そのチャンクは諦めてログに残す
+        （録音の一部が欠けるが、メモリ使用量の上限は保たれる）。
+        """
+        try:
+            self._queue.put_nowait(float32_to_int16(chunk))
+        except queue.Full:
+            _logger.warning("WAV書き込みが追いついていないため、録音チャンクを破棄しました")
 
     @property
     def frames_written(self) -> int:
@@ -89,14 +101,26 @@ class StreamingWavWriter:
             1フレーム以上書き込まれていれば保存先パス、0フレームなら
             ファイルを削除して None。
         """
-        if not self._finalized:
+        with self._lock:
+            already_finalized = self._finalized
             self._finalized = True
-            self._queue.put_nowait(_SENTINEL)
+
+        if not already_finalized:
+            self._queue.put(_SENTINEL)
             self._thread.join(timeout)
             if self._thread.is_alive():
-                _logger.warning("WAV書き込みスレッドがタイムアウトしました（%s秒）", timeout)
-            with contextlib.suppress(Exception):
-                self._wav.close()
+                # 書き込みスレッドがまだ writeframes() の途中である可能性がある。
+                # ここで close() すると seek が交錯しヘッダーを壊しかねないため、
+                # ハンドルは解放せず放棄する。最後に成功した writeframes() の時点で
+                # 既にディスク上のヘッダーは有効なので、ファイル自体は失われない。
+                _logger.warning(
+                    "WAV書き込みスレッドがタイムアウトしました（%s秒）。"
+                    "ファイルハンドルは解放せず放棄します",
+                    timeout,
+                )
+            else:
+                with contextlib.suppress(Exception):
+                    self._wav.close()
 
         if self.frames_written == 0:
             self.path.unlink(missing_ok=True)
@@ -105,10 +129,12 @@ class StreamingWavWriter:
 
     def abort(self) -> None:
         """録音開始に失敗した際、オープン済みファイルを破棄する。"""
-        if self._finalized:
+        with self._lock:
+            already_finalized = self._finalized
+            self._finalized = True
+        if already_finalized:
             return
-        self._finalized = True
-        self._queue.put_nowait(_SENTINEL)
+        self._queue.put(_SENTINEL)
         self._thread.join(timeout=2.0)
         with contextlib.suppress(Exception):
             self._wav.close()
