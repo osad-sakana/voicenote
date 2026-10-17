@@ -1,6 +1,7 @@
 """VoiceNote GUI のメインウィンドウ。"""
 
 import logging
+import time
 from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox
@@ -15,8 +16,9 @@ from .constants import (
     MODE_RECORD_ONLY,
     MODE_RECORD_TRANSCRIBE,
     MODE_TRANSCRIBE_ONLY,
-    PRIMARY_BUTTON_COLOR,
+    format_elapsed,
 )
+from . import theme
 from .devices import build_device_labels, parse_device_id
 from .layout import build_ui
 from .settings_dialog import SettingsDialog
@@ -31,24 +33,31 @@ from .workflow import (
 
 _logger = logging.getLogger("voicenote")
 
-ctk.set_appearance_mode("System")
-ctk.set_default_color_theme("blue")
+theme.apply_global_theme()
+
+_TIMER_INTERVAL_MS = 500
 
 
 class App(TkinterDnD.DnDWrapper, ctk.CTk):
     """メインウィンドウ"""
 
+    WINDOW_WIDTH = 520
+    WINDOW_HEIGHT_COMPACT = 380
+    WINDOW_HEIGHT_EXPANDED = 560
+
     def __init__(self, log_file: Path):
         super().__init__()
         self.TkdndVersion = TkinterDnD._require(self)
         self.title("VoiceNote")
-        self.geometry("480x560")
+        self.geometry(f"{self.WINDOW_WIDTH}x{self.WINDOW_HEIGHT_COMPACT}")
         self.resizable(False, False)
 
         self._log_file = log_file
         self._config: VoiceNoteConfig = VoiceNoteConfig()
         self._alive = True
         self._busy = False
+        self._record_started_at: float | None = None
+        self._timer_after_id: str | None = None
         self._ui_queue = ThreadSafeUIQueue(self, alive_fn=lambda: self._alive)
         self._workflow = RecordingWorkflow(
             self._config,
@@ -177,8 +186,9 @@ class App(TkinterDnD.DnDWrapper, ctk.CTk):
             messagebox.showerror("録音エラー", error_message)
 
     def _stop_recording(self):
+        self._stop_timer()
         self._set_processing(True)
-        self._exec_btn.configure(text="実行", fg_color=PRIMARY_BUTTON_COLOR)
+        self._exec_btn.configure(text="実行", **theme.PRIMARY_STYLE)
         mode = self._mode_var.get()
         self._workflow.stop_and_process(mode)
 
@@ -195,9 +205,13 @@ class App(TkinterDnD.DnDWrapper, ctk.CTk):
     # ──────────────── workflow コールバック (メインスレッドで実行) ────────────────
 
     def _on_recording_started(self):
-        self._exec_btn.configure(text="録音停止", fg_color="red")
+        self._exec_btn.configure(text="録音停止", **theme.DANGER_STYLE)
+        self._status_dot.configure(text_color=theme.RECORDING)
+        self._start_timer()
 
     def _on_processing_started(self):
+        self._stop_timer()
+        self._status_dot.configure(text_color=theme.ACCENT)
         self._set_processing(True)
         self._exec_btn.configure(text="文字起こし中...")
 
@@ -209,6 +223,7 @@ class App(TkinterDnD.DnDWrapper, ctk.CTk):
 
     def _on_close(self):
         self._alive = False
+        self._stop_timer()
         self._workflow.shutdown()
         self.destroy()
 
@@ -219,21 +234,43 @@ class App(TkinterDnD.DnDWrapper, ctk.CTk):
         state = "disabled" if busy else "normal"
         self._exec_btn.configure(state=state)
         self._settings_btn.configure(state=state)
-        for radio in self._mode_radios:
-            radio.configure(state=state)
+        self._mode_selector.configure(state=state)
         self._device_menu.configure(state=state)
 
     def _reset_ui(self):
-        self._status_label.configure(text="待機中", text_color=("gray14", "gray84"))
-        self._exec_btn.configure(text="実行", fg_color=PRIMARY_BUTTON_COLOR)
+        self._stop_timer()
+        self._status_label.configure(text="待機中", text_color=theme.TEXT)
+        self._status_dot.configure(text_color=theme.TEXT_SECONDARY)
+        self._exec_btn.configure(text="実行", **theme.PRIMARY_STYLE)
         self._set_processing(False)
 
     def _show_completion(self, saved_path: Path):
         self._set_processing(False)
-        self._exec_btn.configure(text="実行", fg_color=PRIMARY_BUTTON_COLOR)
-        self._status_label.configure(text=f"完了: {saved_path.name}", text_color="green")
+        self._exec_btn.configure(text="実行", **theme.PRIMARY_STYLE)
+        self._stop_timer()
+        self._status_label.configure(text=f"完了: {saved_path.name}", text_color=theme.SUCCESS)
+        self._status_dot.configure(text_color=theme.SUCCESS)
         self.bell()
         self.after(3000, self._reset_ui)
+
+    def _start_timer(self):
+        self._stop_timer()
+        self._record_started_at = time.monotonic()
+        self._tick_timer()
+
+    def _tick_timer(self):
+        if not self._alive or self._record_started_at is None:
+            return
+        elapsed = time.monotonic() - self._record_started_at
+        self._timer_label.configure(text=format_elapsed(elapsed))
+        self._timer_after_id = self.after(_TIMER_INTERVAL_MS, self._tick_timer)
+
+    def _stop_timer(self):
+        if self._timer_after_id is not None:
+            self.after_cancel(self._timer_after_id)
+            self._timer_after_id = None
+        self._record_started_at = None
+        self._timer_label.configure(text="")
 
     def _set_status(self, text: str):
         self._status_label.configure(text=text)
