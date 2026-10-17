@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """VoiceNote GUI エントリーポイント (CustomTkinter)"""
 
+import multiprocessing
 import socket
 import sys
 
@@ -40,4 +41,8 @@ def main():
 
 
 if __name__ == "__main__":
+    # PyInstaller 版では multiprocessing の子プロセス (tqdm のロックが起動する
+    # resource_tracker など) が `sys.executable -c ...` でアプリ自身を再実行する。
+    # freeze_support() が無いと子が GUI を丸ごと起動してしまうため、最初に呼ぶ。
+    multiprocessing.freeze_support()
     main()
