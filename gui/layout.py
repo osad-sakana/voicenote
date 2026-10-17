@@ -1,8 +1,7 @@
 """App のウィジェット構築処理 (`_build_ui`) を切り出したモジュール。"""
 
-from pathlib import Path
-
 import customtkinter as ctk
+from tkinterdnd2 import DND_FILES
 
 from .constants import MODE_RECORD_TRANSCRIBE, MODES
 
@@ -21,13 +20,19 @@ def build_ui(app) -> None:
 
     ctk.CTkLabel(app, text="モード", anchor="w").pack(fill="x", padx=20, pady=(8, 2))
     app._mode_var = ctk.StringVar(value=MODE_RECORD_TRANSCRIBE)
-    app._mode_menu = ctk.CTkOptionMenu(
-        app,
-        variable=app._mode_var,
-        values=MODES,
-        command=lambda _: app._on_mode_change(),
-    )
-    app._mode_menu.pack(fill="x", padx=20, pady=2)
+    mode_frame = ctk.CTkFrame(app, fg_color="transparent")
+    mode_frame.pack(fill="x", padx=20, pady=2)
+    app._mode_radios = []
+    for mode in MODES:
+        radio = ctk.CTkRadioButton(
+            mode_frame,
+            text=mode,
+            variable=app._mode_var,
+            value=mode,
+            command=app._on_mode_change,
+        )
+        radio.pack(anchor="w", pady=2)
+        app._mode_radios.append(radio)
 
     app._panel = ctk.CTkFrame(app, fg_color="transparent")
     app._panel.pack(fill="x", padx=20, pady=8)
@@ -40,19 +45,10 @@ def build_ui(app) -> None:
     )
     app._device_menu.pack(fill="x", pady=2)
 
-    app._rec_dest_section = ctk.CTkFrame(app._panel, fg_color="transparent")
-    ctk.CTkLabel(app._rec_dest_section, text="録音の保存場所", anchor="w").pack(fill="x")
-    rec_dest_row = ctk.CTkFrame(app._rec_dest_section, fg_color="transparent")
-    rec_dest_row.pack(fill="x", pady=2)
-    app._rec_dest_entry = ctk.CTkEntry(rec_dest_row)
-    app._rec_dest_entry.insert(0, str(Path.home() / "Desktop"))
-    app._rec_dest_entry.pack(side="left", fill="x", expand=True)
-    ctk.CTkButton(rec_dest_row, text="...", width=36, command=app._browse_rec_dest).pack(
-        side="left", padx=(4, 0)
-    )
-
     app._file_section = ctk.CTkFrame(app._panel, fg_color="transparent")
-    ctk.CTkLabel(app._file_section, text="音声ファイル", anchor="w").pack(fill="x")
+    ctk.CTkLabel(
+        app._file_section, text="音声ファイル（ドラッグ&ドロップ可）", anchor="w"
+    ).pack(fill="x")
     file_row = ctk.CTkFrame(app._file_section, fg_color="transparent")
     file_row.pack(fill="x", pady=2)
     app._file_entry = ctk.CTkEntry(file_row, placeholder_text="ファイルを選択してください")
@@ -60,6 +56,8 @@ def build_ui(app) -> None:
     ctk.CTkButton(file_row, text="...", width=36, command=app._browse_audio_file).pack(
         side="left", padx=(4, 0)
     )
+    _register_drop_target(app, app._file_entry)
+    _register_drop_target(app, app._file_section)
 
     app._exec_btn = ctk.CTkButton(
         app,
@@ -76,3 +74,9 @@ def build_ui(app) -> None:
     ctk.CTkLabel(app, text="ログ", anchor="w").pack(fill="x", padx=20, pady=(8, 2))
     app._log_box = ctk.CTkTextbox(app, height=160, state="disabled")
     app._log_box.pack(fill="both", expand=True, padx=20, pady=(0, 12))
+
+
+def _register_drop_target(app, widget) -> None:
+    """指定ウィジェットを音声ファイルのドロップ先として登録する。"""
+    widget.drop_target_register(DND_FILES)
+    widget.dnd_bind("<<Drop>>", app._on_file_drop)

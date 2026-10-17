@@ -6,6 +6,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
+from tkinterdnd2 import TkinterDnD
 
 from config import CONFIG_PATH, InvalidConfigError, VoiceNoteConfig, load_config, save_config
 from recorder import list_devices
@@ -28,11 +29,12 @@ ctk.set_appearance_mode("System")
 ctk.set_default_color_theme("blue")
 
 
-class App(ctk.CTk):
+class App(TkinterDnD.DnDWrapper, ctk.CTk):
     """メインウィンドウ"""
 
     def __init__(self, log_file: Path):
         super().__init__()
+        self.TkdndVersion = TkinterDnD._require(self)
         self.title("VoiceNote")
         self.geometry("480x560")
         self.resizable(False, False)
@@ -40,6 +42,7 @@ class App(ctk.CTk):
         self._log_file = log_file
         self._config: VoiceNoteConfig = VoiceNoteConfig()
         self._alive = True
+        self._busy = False
         self._ui_queue = ThreadSafeUIQueue(self, alive_fn=lambda: self._alive)
         self._workflow = RecordingWorkflow(
             self._config,
@@ -69,12 +72,11 @@ class App(ctk.CTk):
 
     def _on_mode_change(self):
         mode = self._mode_var.get()
-        for section in (self._device_section, self._rec_dest_section, self._file_section):
+        for section in (self._device_section, self._file_section):
             section.pack_forget()
 
         if mode in (MODE_RECORD_TRANSCRIBE, MODE_RECORD_ONLY):
-            self._device_section.pack(fill="x", pady=(0, 8))
-            self._rec_dest_section.pack(fill="x")
+            self._device_section.pack(fill="x")
             self._exec_btn.configure(text="実行")
         elif mode == MODE_TRANSCRIBE_ONLY:
             self._file_section.pack(fill="x")
@@ -122,12 +124,6 @@ class App(ctk.CTk):
 
     # ──────────────── ファイル選択 ────────────────
 
-    def _browse_rec_dest(self):
-        folder = filedialog.askdirectory(title="録音の保存場所を選択")
-        if folder:
-            self._rec_dest_entry.delete(0, "end")
-            self._rec_dest_entry.insert(0, folder)
-
     def _browse_audio_file(self):
         path = filedialog.askopenfilename(
             title="音声ファイルを選択",
@@ -136,6 +132,16 @@ class App(ctk.CTk):
         if path:
             self._file_entry.delete(0, "end")
             self._file_entry.insert(0, path)
+
+    def _on_file_drop(self, event):
+        if self._mode_var.get() != MODE_TRANSCRIBE_ONLY or self._busy:
+            return
+        paths = self.tk.splitlist(event.data)
+        if not paths:
+            return
+        self._file_entry.delete(0, "end")
+        self._file_entry.insert(0, paths[0])
+        self._run_transcribe_only()
 
     # ──────────────── 実行 ────────────────
 
@@ -159,7 +165,7 @@ class App(ctk.CTk):
 
         device_label = self._device_var.get()
         device_id = parse_device_id(device_label)
-        rec_dest = Path(self._rec_dest_entry.get().strip() or str(Path.home() / "Desktop"))
+        rec_dest = Path(self._config.recording_folder or str(Path.home() / "Desktop"))
         error_message = self._workflow.start(device_id, device_label, rec_dest)
         if error_message:
             messagebox.showerror("録音エラー", error_message)
@@ -184,9 +190,6 @@ class App(ctk.CTk):
 
     def _on_recording_started(self):
         self._exec_btn.configure(text="録音停止", fg_color="red")
-        # 保存先は録音開始時にファイルへ確定されるため、録音中の変更は
-        # 反映されない。誤解を避けるため録音中は編集不可にする。
-        self._rec_dest_entry.configure(state="disabled")
 
     def _on_processing_started(self):
         self._set_processing(True)
@@ -206,12 +209,13 @@ class App(ctk.CTk):
     # ──────────────── ユーティリティ ────────────────
 
     def _set_processing(self, busy: bool):
+        self._busy = busy
         state = "disabled" if busy else "normal"
         self._exec_btn.configure(state=state)
         self._settings_btn.configure(state=state)
-        self._mode_menu.configure(state=state)
+        for radio in self._mode_radios:
+            radio.configure(state=state)
         self._device_menu.configure(state=state)
-        self._rec_dest_entry.configure(state=state)
 
     def _reset_ui(self):
         self._status_label.configure(text="待機中", text_color=("gray14", "gray84"))

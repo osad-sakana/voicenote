@@ -36,6 +36,8 @@ def validate_transcribe_only(audio_path: str, save_folder: str) -> tuple[str, st
     """文字起こしのみモードのバリデーション。問題なければ None、あれば (title, message)。"""
     if not audio_path:
         return ("ファイル未選択", "音声ファイルを選択してください")
+    if not Path(audio_path).is_file():
+        return ("ファイルが無効です", "音声ファイルを選択してください（フォルダは指定できません）")
     if not save_folder:
         return ("設定が必要", "先に 設定から文字起こし保存フォルダを設定してください")
     return None

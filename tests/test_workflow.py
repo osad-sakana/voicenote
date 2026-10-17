@@ -153,13 +153,27 @@ class TestValidateTranscribeOnly:
         error = validate_transcribe_only("", "/tmp/notes")
         assert error == ("ファイル未選択", "音声ファイルを選択してください")
 
-    def test_requires_save_folder(self):
-        error = validate_transcribe_only("a.wav", "")
+    def test_requires_existing_file(self, tmp_path: Path):
+        error = validate_transcribe_only(str(tmp_path / "missing.wav"), "/tmp/notes")
+        assert error is not None
+        assert error[0] == "ファイルが無効です"
+
+    def test_rejects_folder(self, tmp_path: Path):
+        error = validate_transcribe_only(str(tmp_path), "/tmp/notes")
+        assert error is not None
+        assert error[0] == "ファイルが無効です"
+
+    def test_requires_save_folder(self, tmp_path: Path):
+        audio_path = tmp_path / "a.wav"
+        audio_path.write_bytes(b"")
+        error = validate_transcribe_only(str(audio_path), "")
         assert error is not None
         assert error[0] == "設定が必要"
 
-    def test_passes_when_both_set(self):
-        assert validate_transcribe_only("a.wav", "/tmp/notes") is None
+    def test_passes_when_both_set(self, tmp_path: Path):
+        audio_path = tmp_path / "a.wav"
+        audio_path.write_bytes(b"")
+        assert validate_transcribe_only(str(audio_path), "/tmp/notes") is None
 
 
 class TestRecordingWorkflowStart:
