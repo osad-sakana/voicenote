@@ -21,7 +21,13 @@ from .devices import build_device_labels, parse_device_id
 from .layout import build_ui
 from .settings_dialog import SettingsDialog
 from .ui_queue import ThreadSafeUIQueue
-from .workflow import RecordingWorkflow, WorkflowCallbacks, validate_start, validate_transcribe_only
+from .workflow import (
+    RecordingWorkflow,
+    WorkflowCallbacks,
+    resolve_recording_dest,
+    validate_start,
+    validate_transcribe_only,
+)
 
 _logger = logging.getLogger("voicenote")
 
@@ -165,7 +171,7 @@ class App(TkinterDnD.DnDWrapper, ctk.CTk):
 
         device_label = self._device_var.get()
         device_id = parse_device_id(device_label)
-        rec_dest = Path(self._config.recording_folder or str(Path.home() / "Desktop"))
+        rec_dest = resolve_recording_dest(self._config)
         error_message = self._workflow.start(device_id, device_label, rec_dest)
         if error_message:
             messagebox.showerror("録音エラー", error_message)

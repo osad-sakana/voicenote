@@ -25,6 +25,13 @@ from .constants import MODE_RECORD_ONLY, MODE_RECORD_TRANSCRIBE
 _logger = logging.getLogger("voicenote")
 
 
+def resolve_recording_dest(config: VoiceNoteConfig) -> Path:
+    """録音ファイルの保存先を返す。未設定ならデスクトップ。"""
+    if config.recording_folder:
+        return Path(config.recording_folder).expanduser()
+    return Path.home() / "Desktop"
+
+
 def validate_start(mode: str, save_folder: str) -> tuple[str, str] | None:
     """録音開始前のバリデーション。問題なければ None、あれば (title, message)。"""
     if mode == MODE_RECORD_TRANSCRIBE and not save_folder:

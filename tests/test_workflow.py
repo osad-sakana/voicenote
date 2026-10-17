@@ -21,6 +21,7 @@ from gui.constants import MODE_RECORD_ONLY, MODE_RECORD_TRANSCRIBE
 from gui.workflow import (
     RecordingWorkflow,
     WorkflowCallbacks,
+    resolve_recording_dest,
     validate_start,
     validate_transcribe_only,
 )
@@ -146,6 +147,19 @@ class TestValidateStart:
 
     def test_passes_when_save_folder_set(self):
         assert validate_start(MODE_RECORD_TRANSCRIBE, "/tmp/notes") is None
+
+
+class TestResolveRecordingDest:
+    def test_defaults_to_desktop_when_unset(self):
+        assert resolve_recording_dest(VoiceNoteConfig()) == Path.home() / "Desktop"
+
+    def test_uses_configured_folder(self):
+        config = VoiceNoteConfig(recording_folder="/tmp/rec")
+        assert resolve_recording_dest(config) == Path("/tmp/rec")
+
+    def test_expands_tilde(self):
+        config = VoiceNoteConfig(recording_folder="~/rec")
+        assert resolve_recording_dest(config) == Path.home() / "rec"
 
 
 class TestValidateTranscribeOnly:
