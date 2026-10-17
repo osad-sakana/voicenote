@@ -14,6 +14,7 @@ uv run pyinstaller main.py \
   --collect-all faster_whisper \
   --collect-all ctranslate2 \
   --collect-all tokenizers \
+  --collect-all tkinterdnd2 \
   --hidden-import sounddevice \
   --hidden-import scipy.io.wavfile \
   --hidden-import av \
