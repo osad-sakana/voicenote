@@ -5,11 +5,6 @@ import multiprocessing
 import socket
 import sys
 
-from dotenv import load_dotenv
-
-from gui.app import App
-from logging_setup import setup_logging
-
 _LOCK_PORT = 47391  # 衝突しにくい固定ポートでシングルインスタンスを保証
 
 
@@ -26,6 +21,13 @@ def _acquire_instance_lock() -> socket.socket | None:
 
 
 def main():
+    # 重い import は freeze_support() の後で行う。multiprocessing の子プロセスも
+    # main.py を先頭から実行するため、モジュール先頭に置くと子が GUI 一式を読み込む。
+    from dotenv import load_dotenv
+
+    from gui.app import App
+    from logging_setup import setup_logging
+
     lock = _acquire_instance_lock()
     if lock is None:
         # 既に起動中 — 何もせず終了
