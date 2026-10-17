@@ -21,6 +21,7 @@ from gui.constants import MODE_RECORD_ONLY, MODE_RECORD_TRANSCRIBE
 from gui.workflow import (
     RecordingWorkflow,
     WorkflowCallbacks,
+    resolve_recording_dest,
     validate_start,
     validate_transcribe_only,
 )
@@ -148,18 +149,45 @@ class TestValidateStart:
         assert validate_start(MODE_RECORD_TRANSCRIBE, "/tmp/notes") is None
 
 
+class TestResolveRecordingDest:
+    def test_defaults_to_desktop_when_unset(self):
+        assert resolve_recording_dest(VoiceNoteConfig()) == Path.home() / "Desktop"
+
+    def test_uses_configured_folder(self):
+        config = VoiceNoteConfig(recording_folder="/tmp/rec")
+        assert resolve_recording_dest(config) == Path("/tmp/rec")
+
+    def test_expands_tilde(self):
+        config = VoiceNoteConfig(recording_folder="~/rec")
+        assert resolve_recording_dest(config) == Path.home() / "rec"
+
+
 class TestValidateTranscribeOnly:
     def test_requires_audio_path(self):
         error = validate_transcribe_only("", "/tmp/notes")
         assert error == ("ファイル未選択", "音声ファイルを選択してください")
 
-    def test_requires_save_folder(self):
-        error = validate_transcribe_only("a.wav", "")
+    def test_requires_existing_file(self, tmp_path: Path):
+        error = validate_transcribe_only(str(tmp_path / "missing.wav"), "/tmp/notes")
+        assert error is not None
+        assert error[0] == "ファイルが無効です"
+
+    def test_rejects_folder(self, tmp_path: Path):
+        error = validate_transcribe_only(str(tmp_path), "/tmp/notes")
+        assert error is not None
+        assert error[0] == "ファイルが無効です"
+
+    def test_requires_save_folder(self, tmp_path: Path):
+        audio_path = tmp_path / "a.wav"
+        audio_path.write_bytes(b"")
+        error = validate_transcribe_only(str(audio_path), "")
         assert error is not None
         assert error[0] == "設定が必要"
 
-    def test_passes_when_both_set(self):
-        assert validate_transcribe_only("a.wav", "/tmp/notes") is None
+    def test_passes_when_both_set(self, tmp_path: Path):
+        audio_path = tmp_path / "a.wav"
+        audio_path.write_bytes(b"")
+        assert validate_transcribe_only(str(audio_path), "/tmp/notes") is None
 
 
 class TestRecordingWorkflowStart:

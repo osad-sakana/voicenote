@@ -26,6 +26,7 @@ class VoiceNoteConfig:
     """アプリケーション設定。全フィールドのデフォルト値をここに集約する。"""
 
     save_folder: str = ""
+    recording_folder: str = ""
     whisper_model: str = "small"
     transcription_mode: str = "local"
     vad_filter: bool = True

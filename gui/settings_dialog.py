@@ -15,7 +15,7 @@ class SettingsDialog(ctk.CTkToplevel):
     def __init__(self, parent, config: VoiceNoteConfig):
         super().__init__(parent)
         self.title("設定")
-        self.geometry("480x380")
+        self.geometry("480x460")
         self.resizable(False, False)
         self.grab_set()
 
@@ -38,6 +38,17 @@ class SettingsDialog(ctk.CTkToplevel):
         ctk.CTkButton(folder_frame, text="...", width=36, command=self._browse_folder).pack(
             side="left", padx=(4, 0)
         )
+
+        ctk.CTkLabel(self, text="録音の保存場所（空欄でデスクトップ）", anchor="w").pack(
+            fill="x", **pad
+        )
+        rec_folder_frame = ctk.CTkFrame(self, fg_color="transparent")
+        rec_folder_frame.pack(fill="x", padx=20, pady=2)
+        self._rec_folder_entry = ctk.CTkEntry(rec_folder_frame)
+        self._rec_folder_entry.pack(side="left", fill="x", expand=True)
+        ctk.CTkButton(
+            rec_folder_frame, text="...", width=36, command=self._browse_rec_folder
+        ).pack(side="left", padx=(4, 0))
 
         ctk.CTkLabel(self, text="文字起こしモード", anchor="w").pack(fill="x", **pad)
         self._mode_var = ctk.StringVar(value="local")
@@ -82,6 +93,7 @@ class SettingsDialog(ctk.CTkToplevel):
 
     def _load_values(self):
         self._folder_entry.insert(0, self._config.save_folder)
+        self._rec_folder_entry.insert(0, self._config.recording_folder)
         self._mode_var.set(self._config.transcription_mode)
         self._model_var.set(self._config.whisper_model)
         self._apikey_entry.insert(0, self._config.openai_api_key or "")
@@ -100,6 +112,12 @@ class SettingsDialog(ctk.CTkToplevel):
             self._folder_entry.delete(0, "end")
             self._folder_entry.insert(0, folder)
 
+    def _browse_rec_folder(self):
+        folder = filedialog.askdirectory(title="録音の保存場所を選択")
+        if folder:
+            self._rec_folder_entry.delete(0, "end")
+            self._rec_folder_entry.insert(0, folder)
+
     def _save(self):
         save_folder = self._folder_entry.get().strip()
         if not save_folder:
@@ -111,10 +129,24 @@ class SettingsDialog(ctk.CTkToplevel):
                 "エラー", f"親ディレクトリが存在しません:\n{folder_path.parent}", parent=self
             )
             return
+
+        rec_folder = self._rec_folder_entry.get().strip()
+        if rec_folder:
+            rec_folder_path = Path(rec_folder).expanduser()
+            if not rec_folder_path.parent.exists():
+                messagebox.showerror(
+                    "エラー",
+                    f"録音の保存場所: 親ディレクトリが存在しません:\n{rec_folder_path.parent}",
+                    parent=self,
+                )
+                return
+            rec_folder = str(rec_folder_path)
+
         api_key = self._apikey_entry.get().strip()
         self._result = replace(
             self._config,
             save_folder=str(folder_path),
+            recording_folder=rec_folder,
             whisper_model=self._model_var.get(),
             transcription_mode=self._mode_var.get(),
             openai_api_key=api_key or None,

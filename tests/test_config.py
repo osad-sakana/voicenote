@@ -64,11 +64,32 @@ class TestVoiceNoteConfigDefaults:
     def test_default_values(self):
         config = VoiceNoteConfig()
         assert config.save_folder == ""
+        assert config.recording_folder == ""
         assert config.whisper_model == "small"
         assert config.transcription_mode == "local"
         assert config.vad_filter is True
         assert config.format_mode == "rule"
         assert config.openai_api_key is None
+
+
+class TestRecordingFolder:
+    def test_round_trips_through_save_and_load(self, tmp_path: Path):
+        path = tmp_path / "config.json"
+        save_config(path, VoiceNoteConfig(recording_folder="/tmp/rec"))
+        loaded = load_config(path)
+        assert loaded is not None
+        assert loaded.recording_folder == "/tmp/rec"
+
+    def test_missing_key_in_legacy_config_defaults_to_empty(self, tmp_path: Path):
+        path = tmp_path / "config.json"
+        path.write_text(json.dumps({"save_folder": "/tmp/x"}), encoding="utf-8")
+        loaded = load_config(path)
+        assert loaded is not None
+        assert loaded.recording_folder == ""
+
+    def test_included_in_to_dict(self):
+        data = VoiceNoteConfig(recording_folder="/tmp/rec").to_dict()
+        assert data["recording_folder"] == "/tmp/rec"
 
 
 class TestToDict:
