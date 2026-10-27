@@ -12,15 +12,18 @@ from tkinterdnd2 import TkinterDnD
 from config import CONFIG_PATH, InvalidConfigError, VoiceNoteConfig, load_config, save_config
 from recorder import list_devices
 
+from . import theme
 from .constants import (
+    MODE_LIVE,
     MODE_RECORD_ONLY,
     MODE_RECORD_TRANSCRIBE,
     MODE_TRANSCRIBE_ONLY,
     format_elapsed,
 )
-from . import theme
 from .devices import build_device_labels, parse_device_id
 from .layout import build_ui
+from .live_controller import LiveController, LiveWorkflowFactory
+from .mode_logic import WindowSpec, normal_exec_spec, other_mode_rejection, window_spec
 from .settings_dialog import SettingsDialog
 from .ui_queue import ThreadSafeUIQueue
 from .workflow import (
@@ -41,16 +44,12 @@ _TIMER_INTERVAL_MS = 500
 class App(TkinterDnD.DnDWrapper, ctk.CTk):
     """メインウィンドウ"""
 
-    WINDOW_WIDTH = 520
-    WINDOW_HEIGHT_COMPACT = 380
-    WINDOW_HEIGHT_EXPANDED = 560
-
-    def __init__(self, log_file: Path):
+    def __init__(self, log_file: Path, live_factory: LiveWorkflowFactory | None = None):
+        """live_factory は LiveWorkflow の生成関数 (省略時は本番実装。確認用に差し替え可)"""
         super().__init__()
         self.TkdndVersion = TkinterDnD._require(self)
         self.title("VoiceNote")
-        self.geometry(f"{self.WINDOW_WIDTH}x{self.WINDOW_HEIGHT_COMPACT}")
-        self.resizable(False, False)
+        self._apply_window(window_spec(MODE_RECORD_TRANSCRIBE, log_visible=False))
 
         self._log_file = log_file
         self._config: VoiceNoteConfig = VoiceNoteConfig()
@@ -75,6 +74,7 @@ class App(TkinterDnD.DnDWrapper, ctk.CTk):
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self._build_ui()
+        self._live = LiveController(self, live_factory)
         self._load_config()
         self._refresh_devices()
         self._on_mode_change()
@@ -89,13 +89,30 @@ class App(TkinterDnD.DnDWrapper, ctk.CTk):
         mode = self._mode_var.get()
         for section in (self._device_section, self._file_section):
             section.pack_forget()
+        self._live.hide()
+        self._apply_window(window_spec(mode, log_visible=self._log_visible))
 
+        if mode == MODE_LIVE:
+            self._device_section.pack(fill="x")
+            self._live.show()
+            return
         if mode in (MODE_RECORD_TRANSCRIBE, MODE_RECORD_ONLY):
             self._device_section.pack(fill="x")
-            self._exec_btn.configure(text="実行")
         elif mode == MODE_TRANSCRIBE_ONLY:
             self._file_section.pack(fill="x")
-            self._exec_btn.configure(text="文字起こし開始")
+        self._refresh_exec_button(mode)
+
+    def _refresh_exec_button(self, mode: str):
+        if self._busy:
+            return  # 処理中の文言 (文字起こし中... など) を保つ
+        text, danger = normal_exec_spec(mode, recording=self._workflow.is_recording)
+        style = theme.DANGER_STYLE if danger else theme.PRIMARY_STYLE
+        self._exec_btn.configure(text=text, state="normal", **style)
+
+    def _apply_window(self, spec: WindowSpec):
+        self.minsize(spec.min_width, spec.min_height)
+        self.geometry(spec.geometry)
+        self.resizable(spec.resizable, spec.resizable)
 
     # ──────────────── 設定 ────────────────
 
@@ -108,6 +125,7 @@ class App(TkinterDnD.DnDWrapper, ctk.CTk):
         if config:
             self._config = config
             self._workflow.update_config(config)
+            self._live.update_config(config)
             self._log("設定を読み込みました")
         else:
             self._log("設定が見つかりません。設定から保存フォルダを設定してください")
@@ -123,6 +141,7 @@ class App(TkinterDnD.DnDWrapper, ctk.CTk):
             save_config(CONFIG_PATH, result)
             self._config = result
             self._workflow.update_config(result)
+            self._live.update_config(result)
             self._log("設定を保存しました")
         except RuntimeError as e:
             messagebox.showerror("エラー", str(e))
@@ -162,7 +181,9 @@ class App(TkinterDnD.DnDWrapper, ctk.CTk):
 
     def _on_exec(self):
         mode = self._mode_var.get()
-        if mode in (MODE_RECORD_TRANSCRIBE, MODE_RECORD_ONLY):
+        if mode == MODE_LIVE:
+            self._live.on_exec()
+        elif mode in (MODE_RECORD_TRANSCRIBE, MODE_RECORD_ONLY):
             if self._workflow.is_recording:
                 self._stop_recording()
             else:
@@ -170,7 +191,16 @@ class App(TkinterDnD.DnDWrapper, ctk.CTk):
         elif mode == MODE_TRANSCRIBE_ONLY:
             self._run_transcribe_only()
 
+    def _reject_if_live_active(self) -> bool:
+        """ライブ処理中なら理由を表示して True (通常録音・文字起こしの開始前に呼ぶ)"""
+        rejection = other_mode_rejection(live_active=self._live.is_active)
+        if rejection:
+            messagebox.showwarning(*rejection)
+        return rejection is not None
+
     def _start_recording(self):
+        if self._reject_if_live_active():
+            return
         mode = self._mode_var.get()
         error = validate_start(mode, self._config.save_folder)
         if error:
@@ -193,6 +223,8 @@ class App(TkinterDnD.DnDWrapper, ctk.CTk):
         self._workflow.stop_and_process(mode)
 
     def _run_transcribe_only(self):
+        if self._reject_if_live_active():
+            return
         audio_path = self._file_entry.get().strip()
         error = validate_transcribe_only(audio_path, self._config.save_folder)
         if error:
@@ -225,6 +257,7 @@ class App(TkinterDnD.DnDWrapper, ctk.CTk):
         self._alive = False
         self._stop_timer()
         self._workflow.shutdown()
+        self._live.shutdown()
         self.destroy()
 
     # ──────────────── ユーティリティ ────────────────
@@ -238,11 +271,19 @@ class App(TkinterDnD.DnDWrapper, ctk.CTk):
         self._device_menu.configure(state=state)
 
     def _reset_ui(self):
+        if self._live.is_active:
+            # 通常処理の完了表示を戻すタイマー (3秒後) がライブ開始後に届いた場合、
+            # ライブのタイマー・状態表示を消さない
+            self._set_processing(False)
+            self._live.refresh_controls()
+            return
         self._stop_timer()
         self._status_label.configure(text="待機中", text_color=theme.TEXT)
         self._status_dot.configure(text_color=theme.TEXT_SECONDARY)
         self._exec_btn.configure(text="実行", **theme.PRIMARY_STYLE)
         self._set_processing(False)
+        if self._mode_var.get() == MODE_LIVE:
+            self._live.refresh_controls()
 
     def _show_completion(self, saved_path: Path):
         self._set_processing(False)

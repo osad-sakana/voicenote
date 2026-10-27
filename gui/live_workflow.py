@@ -22,22 +22,16 @@ import threading
 import time
 import traceback
 from collections.abc import Callable
-from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 
 from config import VoiceNoteConfig
-from live import engines, local_llm, model_fetch, vad
-from live.bootstrap import BackendCheck, LiveSetupError, build_engine, build_vad, check_backend
-from live.level_meter import ChunkSink, InputLevelAssessment, LevelMeter, assess_input_level, tee
-from live.model_fetch import ProgressCallback, RepoSpec, describe_fetch_error
-from live.note import external_send_warning, render_live_note
-from live.session import LiveSession
+from live.bootstrap import LiveSetupError, build_engine, build_vad, check_backend
+from live.level_meter import InputLevelAssessment, LevelMeter, assess_input_level, tee
+from live.model_fetch import describe_fetch_error
+from live.note import render_live_note
 from live.session_models import LiveCallbacks, LiveResult, LiveSettings
-from note_writer import save_live_note
-from recorder import STREAM_STOP_TIMEOUT_SEC, ThreadedRecorder
+from recorder import STREAM_STOP_TIMEOUT_SEC
 
-from .devices import parse_device_id
 from .live_state import (
     LivePhase,
     LiveViewState,
@@ -50,6 +44,47 @@ from .live_state import (
     set_phase,
     to_live_result,
 )
+from .live_workflow_support import (
+    BANNER_ENGINE_FALLBACK,
+    BANNER_EXTERNAL_SEND,
+    BANNER_LOW_INPUT,
+    BANNER_MODEL_DOWNLOAD,
+    BANNER_OLLAMA,
+    BANNER_VAD_FALLBACK,
+    PROGRESS_INTERVAL_SEC,
+    LiveDeps,
+    LiveWorkflowCallbacks,
+    MeterReading,
+    ModelFetcher,
+    external_send_banner_text,
+    format_download_progress,
+    validate_live_start,
+)
+from .live_workflow_support import Cancelled as _Cancelled
+from .live_workflow_support import DownloadProgress as _DownloadProgress
+from .live_workflow_support import Run as _Run
+from .live_workflow_support import SerializedEngine as _SerializedEngine
+from .live_workflow_support import always_allowed as _always_allowed
+from .live_workflow_support import dropped_chunks as _dropped_chunks
+from .live_workflow_support import ollama_banner_text as _ollama_banner_text
+
+__all__ = [
+    "BANNER_ENGINE_FALLBACK",
+    "BANNER_EXTERNAL_SEND",
+    "BANNER_LOW_INPUT",
+    "BANNER_MODEL_DOWNLOAD",
+    "BANNER_OLLAMA",
+    "BANNER_VAD_FALLBACK",
+    "PROGRESS_INTERVAL_SEC",
+    "LiveDeps",
+    "LiveWorkflow",
+    "LiveWorkflowCallbacks",
+    "MeterReading",
+    "ModelFetcher",
+    "external_send_banner_text",
+    "format_download_progress",
+    "validate_live_start",
+]
 
 _logger = logging.getLogger("voicenote")
 
@@ -58,181 +93,8 @@ ERROR_STOP_TIMEOUT_SEC = 2.0  # 失敗・取り消し時にセッションを解
 SHUTDOWN_FINALIZE_TIMEOUT_SEC = 1.0  # ウィンドウを閉じる時の WAV 確定の上限
 SHUTDOWN_JOIN_SEC = 1.0  # ウィンドウを閉じる時にストリーム停止を待つ猶予
 PROBE_TIMEOUT_SEC = 3.0
-PROGRESS_INTERVAL_SEC = 0.25  # ダウンロード進捗バナーの更新間隔
 STREAM_CLOSE_GRACE_FACTOR = 3  # 放棄ストリームの解放を stop_timeout の何倍まで待つか
 MLX_INSTALL_HINT = "uv sync --extra live-mlx"
-
-BANNER_MODEL_DOWNLOAD = "model_download"
-BANNER_ENGINE_FALLBACK = "engine_fallback"
-BANNER_OLLAMA = "ollama"
-BANNER_VAD_FALLBACK = "vad_fallback"
-BANNER_EXTERNAL_SEND = "external_send"
-BANNER_LOW_INPUT = "low_input"
-
-
-def validate_live_start(
-    config: VoiceNoteConfig, device_label: str, *, mic_busy: bool
-) -> tuple[str, str] | None:
-    """ライブ開始前の検証。問題なければ None、あれば (title, message)
-
-    Args:
-        config: 現在の設定
-        device_label: デバイス選択欄のラベル('[3] マイク' 形式。無ければ 'デバイスなし')
-        mic_busy: 通常の録音・文字起こしなど、マイクや処理を使う操作が実行中か
-    """
-    if mic_busy:
-        return ("実行中", "他の録音・文字起こしが実行中です。終了してから開始してください")
-    if not config.save_folder:
-        return (
-            "設定が必要",
-            "先に 設定から文字起こし保存フォルダ(ライブノートの保存先)を設定してください",
-        )
-    if parse_device_id(device_label) is None:
-        return ("デバイスなし", "入力デバイスが見つかりません。マイクを接続してください")
-    try:
-        LiveSettings.from_config(config)
-    except ValueError as e:
-        return ("ライブ設定が不正", f"ライブ文字起こしの設定が不正です: {e}")
-    return None
-
-
-def _format_bytes(num_bytes: int) -> str:
-    if num_bytes >= 1_000_000_000:
-        return f"{num_bytes / 1_000_000_000:.1f} GB"
-    return f"{num_bytes / 1_000_000:.0f} MB"
-
-
-def format_download_progress(model: str, done: int, total: int) -> str:
-    """モデル取得バナーの文言。total=0 は総量不明"""
-    head = f"音声認識モデル {model} をダウンロードしています"
-    if total <= 0:
-        return f"{head}...（{_format_bytes(done)}）"
-    percent = min(100, int(done * 100 / total))
-    return f"{head}... {_format_bytes(done)} / {_format_bytes(total)}（{percent}%）"
-
-
-def _ollama_banner_text(check: BackendCheck) -> str:
-    """要約なしで続行する旨のバナー(`ollama serve` / `ollama pull` の案内は message に含む)"""
-    sep = "。" if check.status == "invalid_url" else " "
-    return f"{check.message}{sep}要約なしで続行します。"
-
-
-def _dropped_chunks(session) -> int:
-    return max(0, int(getattr(session, "dropped_chunks", 0)))
-
-
-def _default_recorder_factory(device_id: int | None, dest: Path, sink: ChunkSink):
-    return ThreadedRecorder(device_id, dest, chunk_sink=sink)
-
-
-@dataclass(frozen=True)
-class ModelFetcher:
-    """Whisper モデルの取得手段(live.model_fetch と同じシグネチャ)"""
-
-    resolve_repo: Callable[[str, str], RepoSpec | None] = model_fetch.resolve_repo
-    is_cached: Callable[[RepoSpec], bool] = model_fetch.is_cached
-    fetch: Callable[[RepoSpec, ProgressCallback | None], str] = model_fetch.fetch
-
-
-@dataclass(frozen=True)
-class LiveDeps:
-    """差し替え可能な依存。既定は本番実装(重い依存は各関数内で遅延 import される)"""
-
-    recorder_factory: Callable[[int | None, Path, ChunkSink], Any] = _default_recorder_factory
-    session_factory: Callable[..., Any] = LiveSession
-    create_engine: Callable[..., Any] = engines.create_engine
-    unavailable_error: type[Exception] = engines.EngineUnavailableError
-    create_vad: Callable[[str], Any] = vad.create_vad
-    vad_kind: Callable[[Any], str | None] = vad.vad_kind
-    client_factory: Callable[..., Any] = local_llm.LocalLLMClient
-    probe_fn: Callable[[Any, str], Any] = local_llm.probe
-    model_fetcher: ModelFetcher = field(default_factory=ModelFetcher)
-    meter_factory: Callable[[], LevelMeter] = LevelMeter
-    note_saver: Callable[..., Path] = save_live_note
-
-
-@dataclass(frozen=True)
-class LiveWorkflowCallbacks:
-    """LiveWorkflow から呼ばれる UI 更新コールバック群(App 側で submit 経由にすること)"""
-
-    on_state: Callable[[LiveViewState], None]
-    on_log: Callable[[str], None]
-    on_recording_started: Callable[[], None]
-    on_wav_saved: Callable[[Path], None]
-    on_done: Callable[[Path, Path], None]  # (wav_path, note_path)
-    on_error: Callable[[str], None]
-
-
-@dataclass(frozen=True)
-class MeterReading:
-    """poll_meter() の読み出し結果"""
-
-    level_db: float
-    backlog_sec: float
-    dropped_chunks: int
-    input_level: InputLevelAssessment
-
-
-@dataclass(frozen=True)
-class _Run:
-    """1回のライブ実行の文脈。設定は開始時点のものを使い続ける"""
-
-    gen: int
-    config: VoiceNoteConfig
-    device_id: int | None
-    device_label: str
-    dest: Path
-    cancel: threading.Event
-
-
-class _Cancelled(Exception):
-    """PREPARING 中に取り消された"""
-
-
-class _SerializedEngine:
-    """load / transcribe を workflow 共有のロック下で実行するラッパー
-
-    session.stop() がタイムアウトしても asr スレッドは処理中の区間を終えるまで動き続ける。
-    次の実行の asr スレッドと同時に mlx(Metal)を使わないよう、実行をまたいで直列化する。
-    """
-
-    def __init__(self, inner, lock: threading.Lock):
-        self._inner = inner
-        self._lock = lock
-
-    def load(self) -> None:
-        with self._lock:
-            self._inner.load()
-
-    def transcribe(self, samples, language):
-        with self._lock:
-            return self._inner.transcribe(samples, language)
-
-
-class _DownloadProgress:
-    """fetch の進捗を間引いてバナー文言に変換する(総量が変わった時・完了時は必ず通知)"""
-
-    def __init__(self, model: str, clock: Callable[[], float], report: Callable[[str], None]):
-        self._model = model
-        self._clock = clock
-        self._report = report
-        self._last_at: float | None = None
-        self.total = 0
-
-    def __call__(self, done: int, total: int) -> None:
-        now = self._clock()
-        changed = total != self.total
-        finished = total > 0 and done >= total
-        self.total = total
-        recent = self._last_at is not None and now - self._last_at < PROGRESS_INTERVAL_SEC
-        if recent and not changed and not finished:
-            return
-        self._last_at = now
-        self._report(format_download_progress(self._model, done, total))
-
-
-def _always_allowed() -> bool:
-    return True
 
 
 class LiveWorkflow:
@@ -312,7 +174,9 @@ class LiveWorkflow:
             self._run = run
             self._state = LiveViewState()
             self._update(set_phase, LivePhase.PREPARING)
-            warning = external_send_warning(run.config.transcription_mode, run.config.format_mode)
+            warning = external_send_banner_text(
+                run.config.transcription_mode, run.config.format_mode
+            )
             if warning is not None:
                 self._update(add_banner, BANNER_EXTERNAL_SEND, warning)
         try:
@@ -734,7 +598,7 @@ class LiveWorkflow:
 
     def _render_and_save(self, run: _Run, result: LiveResult, wav: Path) -> Path:
         config = run.config
-        warning = external_send_warning(config.transcription_mode, config.format_mode)
+        warning = external_send_banner_text(config.transcription_mode, config.format_mode)
         body = render_live_note(result, wav, send_warning=warning)
         folder = Path(config.save_folder).expanduser()
         return self._deps.note_saver(folder, body, audio_file=wav)

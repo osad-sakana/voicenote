@@ -5,6 +5,7 @@ from tkinterdnd2 import DND_FILES
 
 from . import theme
 from .constants import MODE_RECORD_TRANSCRIBE, MODES
+from .mode_logic import resize_on_log_toggle, window_spec
 from .segmented import refresh_segment_text
 
 _LOG_SHOW_TEXT = "詳細ログを表示"
@@ -23,16 +24,19 @@ def build_ui(app) -> None:
 
 
 def toggle_log(app) -> None:
-    """詳細ログの表示/非表示を切り替え、ウィンドウ高さを合わせる。"""
+    """詳細ログの表示/非表示を切り替え、ウィンドウ高さを合わせる (ライブは大きさを保つ)。"""
     app._log_visible = not app._log_visible
     if app._log_visible:
         app._log_box.pack(fill="both", expand=True, pady=(6, 0))
         app._log_toggle.configure(text=_LOG_HIDE_TEXT)
-        app.geometry(f"{app.WINDOW_WIDTH}x{app.WINDOW_HEIGHT_EXPANDED}")
     else:
         app._log_box.pack_forget()
         app._log_toggle.configure(text=_LOG_SHOW_TEXT)
-        app.geometry(f"{app.WINDOW_WIDTH}x{app.WINDOW_HEIGHT_COMPACT}")
+    # ログを隠している間は詰めて、ライブ画面に縦の余白を回す
+    app._log_container.pack_configure(expand=app._log_visible)
+    mode = app._mode_var.get()
+    if resize_on_log_toggle(mode):
+        app._apply_window(window_spec(mode, log_visible=app._log_visible))
 
 
 def _card(parent) -> ctk.CTkFrame:
@@ -54,9 +58,9 @@ def _caption(parent, text: str) -> ctk.CTkLabel:
 def _build_header(app) -> None:
     header = ctk.CTkFrame(app, fg_color="transparent")
     header.pack(fill="x", padx=theme.SCREEN_PAD, pady=(theme.SCREEN_PAD, 8))
-    ctk.CTkLabel(
-        header, text="VoiceNote", font=theme.font(20, "bold"), text_color=theme.TEXT
-    ).pack(side="left")
+    ctk.CTkLabel(header, text="VoiceNote", font=theme.font(20, "bold"), text_color=theme.TEXT).pack(
+        side="left"
+    )
     app._settings_btn = ctk.CTkButton(
         header,
         text="設定",
@@ -192,7 +196,11 @@ def _build_status_card(app) -> None:
 
 def _build_log_section(app) -> None:
     container = ctk.CTkFrame(app, fg_color="transparent")
-    container.pack(fill="both", expand=True, padx=theme.SCREEN_PAD, pady=(8, theme.SCREEN_PAD))
+    # 下端に置く(ライブ画面はこの後に配置され、足りない時はライブ画面側が縮む)
+    container.pack(
+        side="bottom", fill="both", expand=False, padx=theme.SCREEN_PAD, pady=(8, theme.SCREEN_PAD)
+    )
+    app._log_container = container
     app._log_toggle = ctk.CTkButton(
         container,
         text=_LOG_SHOW_TEXT,
