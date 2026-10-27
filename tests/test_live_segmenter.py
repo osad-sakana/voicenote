@@ -234,3 +234,43 @@ def test_invalid_parameters_raise(kwargs):
     """不正なパラメータは ValueError"""
     with pytest.raises(ValueError):
         Segmenter(**kwargs)
+
+
+class TestSkip:
+    """skip(n): 破棄された録音サンプル分だけ時刻を進める"""
+
+    def test_later_segment_shifts_by_skipped_samples(self):
+        pattern_before = [(1.0, False)]
+        pattern_after = [(1.0, False), (1.0, True), (1.0, False)]
+        base = Segmenter()
+        _run(base, pattern_before)
+        expected = _run(base, pattern_after)
+
+        gapped = Segmenter()
+        _run(gapped, pattern_before)
+        skipped = 8000  # 0.5秒分
+        assert gapped.skip(skipped) == []
+        actual = _run(gapped, pattern_after)
+
+        assert len(actual) == len(expected) == 1
+        assert actual[0].start_sec == pytest.approx(expected[0].start_sec + skipped / SR)
+        assert actual[0].end_sec == pytest.approx(expected[0].end_sec + skipped / SR)
+
+    def test_skip_closes_open_segment(self):
+        """欠損をまたいで音声を連結しないよう、開いている区間は欠損の手前で閉じる"""
+        seg = Segmenter()
+        _run(seg, [(1.0, True)])
+        closed = seg.skip(1600)
+        assert len(closed) == 1
+        assert closed[0].end_sec == pytest.approx(_frames(1.0) * FRAME_SEC)
+        assert seg.flush() == []
+
+    def test_skip_zero_is_noop(self):
+        seg = Segmenter()
+        _run(seg, [(1.0, True)])
+        assert seg.skip(0) == []
+        assert len(seg.flush()) == 1
+
+    def test_negative_skip_raises(self):
+        with pytest.raises(ValueError):
+            Segmenter().skip(-1)

@@ -194,6 +194,9 @@ def record_audio(
     """
     音声を録音する（CLI用・Ctrl+Cで停止）
 
+    録音中だけ SIGINT ハンドラを差し替え、戻る時（例外時を含む）に元のハンドラへ復元する。
+    そのため戻った後の Ctrl+C は通常どおり KeyboardInterrupt になる。
+
     Args:
         device: 入力デバイス名またはID（Noneの場合はデフォルト）
         dest_dir: 録音WAVファイルの保存先ディレクトリ
@@ -221,8 +224,25 @@ def record_audio(
             on_stop()
         stop_event.set()
 
-    signal.signal(signal.SIGINT, _signal_handler)
+    prev_handler = signal.signal(signal.SIGINT, _signal_handler)
+    try:
+        return _record_until_stopped(recorder, stop_event, device_id, on_start, on_saved)
+    finally:
+        # WAV 確定・ストリーム停止まで終えてから元のハンドラへ戻す。早く戻すと、
+        # 2回目の Ctrl+C で WAV の確定処理が KeyboardInterrupt に中断されうるため。
+        # None は Python 外で設定されたハンドラを意味し、signal.signal には渡せない。
+        if prev_handler is not None:
+            signal.signal(signal.SIGINT, prev_handler)
 
+
+def _record_until_stopped(
+    recorder: ThreadedRecorder,
+    stop_event: threading.Event,
+    device_id: int | None,
+    on_start: Callable[[str], None] | None,
+    on_saved: Callable[[Path], None] | None,
+) -> Path:
+    """録音を開始し、停止要求を待ってから WAV を確定 → ストリームを停止する"""
     device_name = sd.query_devices(device_id)["name"] if device_id is not None else "デフォルト"
     if on_start:
         on_start(device_name)

@@ -164,6 +164,12 @@ def main():
 
     try:
         saved_path = _run_transcription(audio_file, config)
+    except KeyboardInterrupt:
+        # record_audio が SIGINT ハンドラを復元するため、文字起こし中の Ctrl+C はここに来る
+        console.print(
+            f"\n[yellow]文字起こしを中断しました（音声は保存済み）: {audio_file.absolute()}[/yellow]"
+        )
+        sys.exit(130)
     except Exception as e:
         console.print(f"[red]{e}[/red]")
         sys.exit(1)

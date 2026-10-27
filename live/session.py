@@ -80,6 +80,8 @@ class LiveSession:
         self._backlog_samples = 0  # 整数で数え、浮動小数の誤差を溜めない
         self._dropped_segments = 0
         self._results: tuple[LiveSegment, ...] = ()
+        # 破棄したが時刻にまだ反映していないサンプル数。feed(録音コールバック)だけが読み書きする
+        self._pending_gap_samples = 0
         self._closing = threading.Event()  # feed 停止 + segmenter に残りの処理を促す
         self._segmenter_done = threading.Event()
         self._abort_asr = threading.Event()  # stop の timeout 超過時に asr を打ち切る
@@ -127,10 +129,20 @@ class LiveSession:
             thread.start()
 
     def feed(self, chunk: np.ndarray) -> None:
-        """録音チャンクを受け取る(chunk_sink)。キューに積むだけで即座に戻る"""
+        """
+        録音チャンクを受け取る(chunk_sink)。キューに積むだけで即座に戻る。
+
+        満杯で破棄したチャンクのサンプル数は累計し、次に積めたチャンクに
+        (直前の欠損サンプル数, チャンク) として添える。キューが満杯のときに別のマーカーを
+        積むことはできないため、欠損はチャンクと同じ要素で運ぶ。
+        """
         if self._closing.is_set():
             return
-        self._chunks.put_nowait(chunk)
+        gap = self._pending_gap_samples
+        if self._chunks.put_nowait((gap, chunk)):
+            self._pending_gap_samples = 0
+        else:
+            self._pending_gap_samples = gap + len(chunk)
 
     def stop(self, timeout: float = 30.0) -> LiveResult:
         """
@@ -215,12 +227,17 @@ class LiveSession:
         warned = False
         try:
             while True:
-                chunk = self._chunks.get(timeout=self._settings.poll_sec)
-                if chunk is None:
+                item = self._chunks.get(timeout=self._settings.poll_sec)
+                if item is None:
                     if self._closing.is_set():
                         break
                     continue
+                gap, chunk = item
                 try:
+                    # Framer の端数(1フレーム未満, 約32ms)は欠損の後ろに回るため、その分だけ
+                    # 誤差が残るが、以降の新しいチャンクの時刻は WAV と一致する
+                    if gap:
+                        self._enqueue_all(segmenter.skip(gap))
                     for frame in framer.push(chunk):
                         prob = self._vad.speech_prob(frame)
                         self._enqueue_all(segmenter.push(frame, prob))

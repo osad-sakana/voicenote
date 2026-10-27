@@ -315,7 +315,9 @@ class TestChunkSink:
         received: list[np.ndarray] = []
         holder: dict = {}
         _start_with_fake_stream(
-            monkeypatch, tmp_path, chunk_sink=received.append,
+            monkeypatch,
+            tmp_path,
+            chunk_sink=received.append,
             writer_factory=_fake_writer_factory(holder),
         )
 
@@ -339,7 +341,9 @@ class TestChunkSink:
         def run(sink):
             holder: dict = {}
             _start_with_fake_stream(
-                monkeypatch, tmp_path, chunk_sink=sink,
+                monkeypatch,
+                tmp_path,
+                chunk_sink=sink,
                 writer_factory=_fake_writer_factory(holder),
             )
             for chunk in chunks:
@@ -369,7 +373,9 @@ class TestChunkSink:
             return writer
 
         _start_with_fake_stream(
-            monkeypatch, tmp_path, chunk_sink=lambda c: order.append("sink"),
+            monkeypatch,
+            tmp_path,
+            chunk_sink=lambda c: order.append("sink"),
             writer_factory=factory,
         )
         assert order == ["write", "sink"]
@@ -383,7 +389,9 @@ class TestChunkSink:
                 raise OSError("disk full")
 
         _start_with_fake_stream(
-            monkeypatch, tmp_path, chunk_sink=received.append,
+            monkeypatch,
+            tmp_path,
+            chunk_sink=received.append,
             writer_factory=lambda dest, rate: FailingWriter(dest, rate),
         )
         assert len(received) == 1
@@ -391,7 +399,9 @@ class TestChunkSink:
     def test_sink_not_called_after_finalize(self, tmp_path, monkeypatch):
         received: list[np.ndarray] = []
         recorder = _start_with_fake_stream(
-            monkeypatch, tmp_path, chunk_sink=received.append,
+            monkeypatch,
+            tmp_path,
+            chunk_sink=received.append,
             writer_factory=lambda dest, rate: FakeWriter(dest, rate),
         )
         recorder.finalize_recording()
@@ -403,7 +413,9 @@ class TestChunkSink:
     def test_no_sink_keeps_existing_behavior(self, tmp_path, monkeypatch):
         holder: dict = {}
         _start_with_fake_stream(
-            monkeypatch, tmp_path, chunk_sink=None,
+            monkeypatch,
+            tmp_path,
+            chunk_sink=None,
             writer_factory=_fake_writer_factory(holder),
         )
         FakeInputStream.last_instance.callback(
@@ -462,9 +474,7 @@ class TestRecordAudioChunkSink:
                 return True
 
         monkeypatch.setattr(recorder_module, "ThreadedRecorder", SpyRecorder)
-        monkeypatch.setattr(
-            recorder_module, "threading", SimpleNamespace(Event=ImmediateEvent)
-        )
+        monkeypatch.setattr(recorder_module, "threading", SimpleNamespace(Event=ImmediateEvent))
         monkeypatch.setattr(recorder_module.signal, "signal", lambda *a, **kw: None)
         return recorder_module
 
@@ -489,3 +499,69 @@ class TestRecordAudioChunkSink:
         recorder_module.record_audio()
 
         assert captured["chunk_sink"] is None
+
+
+class TestRecordAudioRestoresSigint:
+    """record_audio は終了時に元の SIGINT ハンドラへ必ず戻す"""
+
+    PREV = object()
+
+    def _patch(self, monkeypatch, finalize_result):
+        import recorder as recorder_module
+
+        calls: list[tuple] = []
+
+        def fake_signal(signum, handler):
+            calls.append((signum, handler))
+            return self.PREV
+
+        class SpyRecorder:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def start(self):
+                pass
+
+            def finalize_recording(self, timeout=2.0):
+                return finalize_result
+
+            def stop_with_timeout(self, timeout=5.0):
+                return True
+
+        class ImmediateEvent:
+            def set(self):
+                pass
+
+            def wait(self):
+                return True
+
+        monkeypatch.setattr(recorder_module, "ThreadedRecorder", SpyRecorder)
+        monkeypatch.setattr(recorder_module, "threading", SimpleNamespace(Event=ImmediateEvent))
+        monkeypatch.setattr(recorder_module.signal, "signal", fake_signal)
+        return recorder_module, calls
+
+    def test_restores_previous_handler_on_success(self, monkeypatch):
+        import signal as signal_module
+
+        recorder_module, calls = self._patch(monkeypatch, Path("/tmp/fake.wav"))
+        recorder_module.record_audio()
+        assert len(calls) == 2
+        assert calls[0][0] == signal_module.SIGINT
+        assert calls[0][1] is not self.PREV
+        assert calls[-1] == (signal_module.SIGINT, self.PREV)
+
+    def test_restores_previous_handler_on_error(self, monkeypatch):
+        import signal as signal_module
+
+        recorder_module, calls = self._patch(monkeypatch, None)
+        with pytest.raises(RuntimeError):
+            recorder_module.record_audio()
+        assert calls[-1] == (signal_module.SIGINT, self.PREV)
+
+    def test_skips_restore_when_previous_handler_unknown(self, monkeypatch):
+        recorder_module, calls = self._patch(monkeypatch, Path("/tmp/fake.wav"))
+        monkeypatch.setattr(
+            recorder_module.signal, "signal", lambda signum, handler: calls.append(handler)
+        )
+        recorder_module.record_audio()
+        assert len(calls) == 1  # 前のハンドラが None(Python 外で設定)なら戻さない

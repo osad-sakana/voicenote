@@ -39,8 +39,11 @@ def env(monkeypatch, tmp_path):
     created_engines: list[str] = []
     engine_errors: dict[str, Exception] = {}
 
+    created_models: list[tuple[str, str]] = []
+
     def create_engine(name, model, notify=None):
         created_engines.append(name)
+        created_models.append((name, model))
         if name in engine_errors:
             raise engine_errors[name]
         return MagicMock(name=f"engine-{name}")
@@ -75,9 +78,12 @@ def env(monkeypatch, tmp_path):
     saved_note = tmp_path / "notes" / "x_live.md"
     note_bodies: list[str] = []
 
-    def save_live_note(folder, body):
+    note_audio_files: list[Path] = []
+
+    def save_live_note(folder, body, audio_file=None):
         events.append("save_live_note")
         note_bodies.append(body)
+        note_audio_files.append(audio_file)
         return saved_note
 
     monkeypatch.setattr(live_cli, "save_live_note", save_live_note)
@@ -96,11 +102,13 @@ def env(monkeypatch, tmp_path):
     e.out = out
     e.wav = wav
     e.created_engines = created_engines
+    e.created_models = created_models
     e.engine_errors = engine_errors
     e.session = session
     e.session_cls = session_cls
     e.record_kwargs = record_kwargs
     e.note_bodies = note_bodies
+    e.note_audio_files = note_audio_files
     e.probe_status = probe_status
     e.config = VoiceNoteConfig(save_folder=str(tmp_path / "notes"))
     e.dest = tmp_path / "Desktop"
@@ -130,11 +138,62 @@ class TestRunLiveOrder:
         assert "要約" in env.note_bodies[0]
         assert str(env.wav) in env.note_bodies[0]
 
+    def test_live_note_is_named_after_wav(self, env):
+        live_cli.run_live(env.config, None, env.dest)
+        assert env.note_audio_files == [env.wav]
+
     def test_prints_retranscribe_hint(self, env):
         live_cli.run_live(env.config, None, env.dest)
         text = env.out.getvalue()
         assert "--file" in text
         assert env.wav.name in text
+        assert "OpenAI に送信します" not in text
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [{"transcription_mode": "openai"}, {"format_mode": "llm"}],
+        ids=["openai", "llm"],
+    )
+    def test_hint_warns_external_send(self, env, overrides):
+        config = VoiceNoteConfig(save_folder=env.config.save_folder, **overrides)
+        live_cli.run_live(config, None, env.dest)
+        text = env.out.getvalue()
+        assert "OpenAI に送信します" in text
+        assert "local / rule" in text
+
+    def test_note_quality_warning_mentions_external_send(self, env):
+        env.session.stop.side_effect = lambda timeout=None: LiveResult(
+            segments=(), final_summary="", dropped_chunks=2
+        )
+        config = VoiceNoteConfig(save_folder=env.config.save_folder, transcription_mode="openai")
+        live_cli.run_live(config, None, env.dest)
+        assert "OpenAI に送信します" in env.note_bodies[0]
+
+
+class TestInterruptDuringStop:
+    """record_audio が SIGINT ハンドラを戻した後の Ctrl+C(session.stop 中)"""
+
+    def _interrupt(self, env):
+        def stop(timeout=None):
+            env.events.append("session.stop")
+            raise KeyboardInterrupt
+
+        env.session.stop.side_effect = stop
+
+    def test_interrupt_skips_note_and_keeps_wav(self, env):
+        self._interrupt(env)
+        live_cli.run_live(env.config, None, env.dest)  # 例外は外へ漏らさない
+        text = env.out.getvalue()
+        assert "ライブノート作成を中断しました（WAVは保存済み）" in text
+        assert env.wav.name in text
+        assert "--file" in text
+        assert "save_live_note" not in env.events
+
+    def test_interrupt_hint_warns_external_send(self, env):
+        self._interrupt(env)
+        config = VoiceNoteConfig(save_folder=env.config.save_folder, format_mode="llm")
+        live_cli.run_live(config, None, env.dest)
+        assert "OpenAI に送信します" in env.out.getvalue()
 
 
 class TestEngineFallback:
@@ -146,6 +205,35 @@ class TestEngineFallback:
         assert "uv sync --extra live-mlx" in env.out.getvalue()
         settings = env.session_cls.call_args.args[0]
         assert settings.engine == "faster-whisper"
+
+    MLX_REPO = "mlx-community/whisper-small-mlx"
+
+    def test_fallback_does_not_pass_mlx_repo_to_faster_whisper(self, env):
+        env.engine_errors["mlx"] = FakeUnavailable("mlx-whisper がありません")
+        config = VoiceNoteConfig(
+            save_folder=env.config.save_folder, live_engine="mlx", live_whisper_model=self.MLX_REPO
+        )
+        live_cli.run_live(config, None, env.dest)
+        assert env.created_models == [("mlx", self.MLX_REPO), ("faster-whisper", "small")]
+        assert env.session_cls.call_args.args[0].model == "small"
+
+    def test_fallback_keeps_short_model_name(self, env):
+        env.engine_errors["mlx"] = FakeUnavailable("mlx-whisper がありません")
+        config = VoiceNoteConfig(
+            save_folder=env.config.save_folder, live_engine="mlx", live_whisper_model="medium"
+        )
+        live_cli.run_live(config, None, env.dest)
+        assert env.created_models[-1] == ("faster-whisper", "medium")
+
+    def test_load_time_fallback_does_not_pass_mlx_repo(self, env):
+        config = VoiceNoteConfig(
+            save_folder=env.config.save_folder, live_engine="mlx", live_whisper_model=self.MLX_REPO
+        )
+        live_cli.run_live(config, None, env.dest)
+        engine = env.session_cls.call_args.kwargs["engine"]
+        engine._primary.load.side_effect = FakeUnavailable("download failed")
+        engine.load()
+        assert env.created_models[-1] == ("faster-whisper", "small")
 
     def test_exits_when_fallback_also_fails(self, env):
         env.engine_errors["faster-whisper"] = FakeUnavailable("壊れている")
@@ -173,6 +261,29 @@ class TestLLMProbe:
     def test_ok_llm_passes_backend(self, env):
         live_cli.run_live(env.config, None, env.dest)
         assert env.session_cls.call_args.kwargs["backend"] is not None
+
+    def test_probe_uses_short_timeout_but_summary_does_not(self, env, monkeypatch):
+        """疎通確認だけ短いタイムアウトにし、録音開始を待たせない(要約は通常のタイムアウト)"""
+        created: list[tuple[MagicMock, dict]] = []
+
+        def client(base_url, model, **kwargs):
+            instance = MagicMock(name="client")
+            created.append((instance, kwargs))
+            return instance
+
+        probed: list[MagicMock] = []
+        monkeypatch.setattr(live_cli, "LocalLLMClient", client)
+        monkeypatch.setattr(
+            live_cli, "probe", lambda backend, model: probed.append(backend) or FakeProbe("ok")
+        )
+        live_cli.run_live(env.config, None, env.dest)
+        probe_client = probed[0]
+        probe_kwargs = next(kw for inst, kw in created if inst is probe_client)
+        assert probe_kwargs["timeout"] == live_cli.PROBE_TIMEOUT_SEC == 3.0
+        backend = env.session_cls.call_args.kwargs["backend"]
+        assert backend is not probe_client
+        backend_kwargs = next(kw for inst, kw in created if inst is backend)
+        assert "timeout" not in backend_kwargs
 
     def test_disabled_llm_skips_probe(self, env, monkeypatch):
         probe = MagicMock()

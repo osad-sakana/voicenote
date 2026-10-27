@@ -110,6 +110,21 @@ class Segmenter:
             return []
         return self._close()
 
+    def skip(self, n_samples: int) -> list[Segment]:
+        """
+        録音から欠損した n_samples サンプル分だけ時刻を進める(以降の区間時刻を WAV と揃える)。
+        欠損をまたいで音声を連結しないよう、開いている区間は欠損の手前で確定して返す。
+        """
+        if n_samples < 0:
+            raise ValueError(f"n_samples は0以上が必要です: {n_samples}")
+        if n_samples == 0:
+            return []
+        closed = self.flush()
+        self._pos += n_samples
+        # _seg_start 等を進めた位置で初期化し直すため、位置の更新後に待機状態へ戻す
+        self._reset_idle()
+        return closed
+
     def _push_idle(self, samples: np.ndarray, is_speech: bool) -> list[Segment]:
         self._lookback.append(samples)
         self._onset_run = self._onset_run + 1 if is_speech else 0

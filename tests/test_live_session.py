@@ -330,6 +330,31 @@ class TestResilience:
         assert engine.calls == 0
         assert len([w for w in rec.warnings if "no model" in w]) == 1
 
+    def test_vad_exception_warns_once_and_session_survives(self):
+        """VAD の例外ではセッションを止めず、警告は1回だけ出す"""
+
+        class FailingVAD:
+            def speech_prob(self, frame):
+                raise RuntimeError("vad boom")
+
+        rec = Recorder()
+        session = LiveSession(
+            make_settings(),
+            engine=FakeEngine(),
+            vad=FailingVAD(),
+            backend=None,
+            callbacks=rec.callbacks(),
+            clock=FakeClock(),
+        )
+        session.start()
+        feed_audio(session, bursts(2))
+        result = session.stop(timeout=WAIT_SEC)
+        vad_warnings = [w for w in rec.warnings if "音声区間の検出に失敗しました" in w]
+        assert len(vad_warnings) == 1
+        assert "vad boom" in vad_warnings[0]
+        assert result.segments == ()
+        assert result.complete is True
+
     def test_callback_exception_does_not_kill_session(self):
         received: list[str] = []
 
@@ -386,6 +411,35 @@ class TestBackpressure:
         assert session.dropped_chunks == 3
         result = session.stop(timeout=WAIT_SEC)
         assert result.dropped_chunks == 3
+
+    def test_dropped_chunks_shift_later_timestamps(self):
+        """破棄されたチャンクのサンプル数だけ、以降の区間の時刻が後ろにずれる(WAVと一致)"""
+        chunk = 1024  # フレーム長(512)の倍数にして Framer の端数を出さない
+        head = [tone(1.024), silence(0.768)]  # 1区間目を閉じ切ってから破棄を起こす
+        tail = [silence(0.512), tone(1.024)]
+        dropped = np.zeros(chunk, dtype=np.float32)
+
+        def run(drop: bool) -> tuple[LiveSegment, ...]:
+            head_audio = np.concatenate(head)
+            queue_size = len(head_audio) // chunk
+            session = make_session(FakeEngine(), chunk_queue_size=queue_size if drop else 2000)
+            for i in range(0, len(head_audio), chunk):
+                session.feed(head_audio[i : i + chunk].reshape(-1, 1))
+            if drop:
+                session.feed(dropped.reshape(-1, 1))  # 満杯のため破棄される
+                assert session.dropped_chunks == 1
+            session.start()
+            assert wait_until(lambda: session._chunks.qsize() == 0)
+            tail_audio = np.concatenate(tail)
+            for i in range(0, len(tail_audio), chunk):
+                session.feed(tail_audio[i : i + chunk].reshape(-1, 1))
+            return session.stop(timeout=WAIT_SEC).segments
+
+        expected = run(drop=False)
+        actual = run(drop=True)
+        assert len(actual) == len(expected) == 2
+        assert actual[0].start_sec == pytest.approx(expected[0].start_sec)
+        assert actual[1].start_sec == pytest.approx(expected[1].start_sec + chunk / SR)
 
     def test_feed_after_stop_is_ignored(self):
         session = make_session(FakeEngine())
@@ -454,6 +508,39 @@ class TestSummary:
         result = session.stop(timeout=WAIT_SEC)
         assert result.final_summary == SUMMARY_TEXT
         assert rec.summaries[-1] == SUMMARY_TEXT
+
+    def test_final_summary_update_is_notified(self):
+        """最終要約で内容が変わったら on_summary で通知し、結果にも入る"""
+        rec = Recorder()
+        backend = FakeBackend()
+        session = make_session(FakeEngine(), backend=backend, rec=rec, clock=FakeClock(0.0))
+        session.start()
+        feed_audio(session, bursts(1))
+        assert wait_until(lambda: rec.summaries == [SUMMARY_TEXT])
+        updated = f"{SUMMARY_TEXT}\n- 要点その2が話された"
+        backend.reply = updated
+        feed_audio(session, bursts(1))
+        assert wait_until(lambda: len(rec.segments) == 2)  # clock=0 なので周期要約は走らない
+        result = session.stop(timeout=WAIT_SEC)
+        assert result.final_summary == updated
+        assert rec.summaries == [SUMMARY_TEXT, updated]
+
+    def test_final_summary_timeout_keeps_previous_with_warning(self, gates):
+        """最終要約が timeout 内に終わらなければ直前の要約を使い、警告する"""
+        rec = Recorder()
+        backend = FakeBackend()
+        session = make_session(FakeEngine(), backend=backend, rec=rec, clock=FakeClock(0.0))
+        session.start()
+        feed_audio(session, bursts(1))
+        assert wait_until(lambda: rec.summaries == [SUMMARY_TEXT])
+        backend.gate = gates()  # 以降の要約呼び出しは解放されるまで返らない
+        feed_audio(session, bursts(1))
+        assert wait_until(lambda: len(rec.segments) == 2)
+        began = time.monotonic()
+        result = session.stop(timeout=0.5)
+        assert time.monotonic() - began < 2.0
+        assert result.final_summary == SUMMARY_TEXT
+        assert any("最終要約が時間内に終わらなかった" in w for w in rec.warnings)
 
     def test_final_summary_failure_keeps_previous(self):
         backend = FakeBackend()

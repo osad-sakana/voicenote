@@ -19,9 +19,9 @@ from rich.console import Console
 from rich.live import Live
 from rich.panel import Panel
 
-from config import VoiceNoteConfig
+from config import DEFAULT_LIVE_WHISPER_MODEL, VoiceNoteConfig
 from live.local_llm import LocalLLMClient, probe
-from live.note import render_live_note
+from live.note import external_send_warning, render_live_note
 from live.session import LiveCallbacks, LiveSession, LiveSettings
 from live.vad import create_vad
 from live.view import LiveView
@@ -33,6 +33,7 @@ console = Console()
 FALLBACK_ENGINE = "faster-whisper"
 SESSION_STOP_TIMEOUT_SEC = 120.0
 ERROR_STOP_TIMEOUT_SEC = 2.0
+PROBE_TIMEOUT_SEC = 3.0
 MLX_INSTALL_HINT = "uv sync --extra live-mlx"
 
 
@@ -106,18 +107,24 @@ def _create_engine(settings: LiveSettings):
     if settings.engine == FALLBACK_ENGINE:
         return primary, settings
     # 生成できても load() 時に利用不可になりうるため、読み込み時のフォールバックも備える
+    fallback_model = _fallback_model(settings.model)
     engine = FallbackOnLoadEngine(
         primary,
-        lambda: create_engine(FALLBACK_ENGINE, settings.model, notify=_notify),
+        lambda: create_engine(FALLBACK_ENGINE, fallback_model, notify=_notify),
         unavailable_error,
         _warn,
     )
     return engine, settings
 
 
+def _fallback_model(model: str) -> str:
+    """mlx 向けの HuggingFace リポジトリ指定("/" を含む)は faster-whisper の既定モデルに戻す"""
+    return DEFAULT_LIVE_WHISPER_MODEL if "/" in model else model
+
+
 def _create_fallback(create_engine, unavailable_error, settings: LiveSettings):
     """faster-whisper エンジンを生成する。それも使えなければ致命的エラーで終了する"""
-    fallback = replace(settings, engine=FALLBACK_ENGINE)
+    fallback = replace(settings, engine=FALLBACK_ENGINE, model=_fallback_model(settings.model))
     try:
         return create_engine(fallback.engine, fallback.model, notify=_notify), fallback
     except unavailable_error as e:
@@ -130,16 +137,20 @@ def _prepare_backend(settings: LiveSettings):
     if not settings.llm_enabled:
         return None
     try:
-        backend = LocalLLMClient(settings.llm_base_url, settings.llm_model)
+        # 疎通確認は録音開始前に行うため短いタイムアウトの別クライアントを使う。
+        # 要約は生成に時間がかかるので、本番のクライアントは既定のタイムアウトにする
+        probe_client = LocalLLMClient(
+            settings.llm_base_url, settings.llm_model, timeout=PROBE_TIMEOUT_SEC
+        )
     except ValueError as e:
         console.print(f"[yellow]⚠ {e}。要約なしで続行します。[/yellow]")
         return None
-    result = probe(backend, settings.llm_model)
+    result = probe(probe_client, settings.llm_model)
     if result.status != "ok":
         console.print(f"[yellow]⚠ {result.message} 要約なしで続行します。[/yellow]")
         return None
     console.print(f"[green]✓ {result.message}[/green]")
-    return backend
+    return LocalLLMClient(settings.llm_base_url, settings.llm_model)
 
 
 def _make_callbacks(view: LiveView) -> LiveCallbacks:
@@ -207,23 +218,54 @@ def run_live(config: VoiceNoteConfig, device: str | None, dest_dir: Path) -> Non
         session.stop(timeout=ERROR_STOP_TIMEOUT_SEC)
         _fatal(str(e))
     # ここに到達した時点で「WAV確定 → ストリーム停止」は完了済み。最後にライブ側をドレインする
-    console.print("[cyan]残りの区間を文字起こしし、最終要約を作成しています...[/cyan]")
-    result = session.stop(timeout=SESSION_STOP_TIMEOUT_SEC)
+    send_warning = external_send_warning(config.transcription_mode, config.format_mode)
+    console.print(
+        "[cyan]残りの区間を文字起こしし、最終要約を作成しています...（Ctrl+C で中断）[/cyan]"
+    )
     try:
-        note_path = save_live_note(Path(config.save_folder), render_live_note(result, audio_file))
+        result = session.stop(timeout=SESSION_STOP_TIMEOUT_SEC)
+    except KeyboardInterrupt:
+        # record_audio は戻る前に SIGINT ハンドラを復元するため、ここでの Ctrl+C は
+        # KeyboardInterrupt になる。WAV は確定済みなのでノート生成だけを諦める
+        _print_interrupted(audio_file, send_warning)
+        return
+    try:
+        body = render_live_note(result, audio_file, send_warning=send_warning)
+        note_path = save_live_note(Path(config.save_folder), body, audio_file=audio_file)
     except RuntimeError as e:
         _fatal(f"{e}（録音は {audio_file.absolute()} に保存済みです）")
-    _print_done(audio_file, note_path)
+    _print_done(audio_file, note_path, send_warning)
 
 
-def _print_done(audio_file: Path, note_path: Path) -> None:
+def _retranscribe_hint(audio_file: Path, send_warning: str | None) -> str:
+    """`--file` での再文字起こし案内。外部送信する設定なら警告を併記する"""
+    hint = (
+        "[dim]ライブのテキストは速報版です。高精度な全文が必要な場合は次を実行してください:[/dim]\n"
+        f'uv run main_cli.py --file "{audio_file.absolute()}"'
+    )
+    if send_warning is None:
+        return hint
+    return f"{hint}\n[yellow]⚠ {send_warning}[/yellow]"
+
+
+def _print_interrupted(audio_file: Path, send_warning: str | None) -> None:
+    console.print(
+        Panel.fit(
+            f"[bold yellow]ライブノート作成を中断しました（WAVは保存済み）[/bold yellow]\n\n"
+            f"[bold]音声ファイル:[/bold]\n{audio_file.absolute()}\n\n"
+            f"{_retranscribe_hint(audio_file, send_warning)}",
+            border_style="yellow",
+        )
+    )
+
+
+def _print_done(audio_file: Path, note_path: Path, send_warning: str | None) -> None:
     console.print(
         Panel.fit(
             f"[bold green]完了![/bold green]\n\n"
             f"[bold]音声ファイル:[/bold]\n{audio_file.absolute()}\n\n"
             f"[bold]ライブノート:[/bold]\n{note_path.absolute()}\n\n"
-            f"[dim]ライブのテキストは速報版です。高精度な全文が必要な場合は次を実行してください:[/dim]\n"
-            f'uv run main_cli.py --file "{audio_file.absolute()}"',
+            f"{_retranscribe_hint(audio_file, send_warning)}",
             border_style="green",
         )
     )

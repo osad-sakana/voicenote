@@ -6,7 +6,8 @@
 import re
 from collections import Counter
 
-# 部分一致で幻覚とみなす定型句(正規化後の文字列で比較する)
+# 幻覚とみなす定型句(正規化後の文字列で比較する)。
+# 定型句以外の残りが KNOWN_PHRASE_MAX_EXTRA_CHARS 文字以下(文全体がほぼ定型句)のときだけ幻覚とする
 HALLUCINATION_PHRASES: tuple[str, ...] = (
     "ご視聴ありがとうございました",
     "ご視聴ありがとうございます",
@@ -28,9 +29,12 @@ STRIP_CHARS_PATTERN = re.compile(r"[\s。、，,．.！!？?・…「」『』()
 SENTENCE_SPLIT_PATTERN = re.compile(r"[。！？!?\n]+")
 # 1〜10文字のパターンが6回以上連続し、かつテキストの過半を占めたら反復とみなす
 REPEATED_PATTERN = re.compile(r"(.{1,10}?)\1{5,}")
+# 反復パターン・同一文の反復の両方で「テキストの大半」とみなす比率
 REPEATED_PATTERN_MIN_RATIO = 0.6
 
 SENTENCE_REPEAT_THRESHOLD = 3
+# 「チャンネル登録よろしくお願いします」の「よろしくお願いします」程度の付け足しまでは許容する
+KNOWN_PHRASE_MAX_EXTRA_CHARS = 10
 NO_SPEECH_PROB_THRESHOLD = 0.6
 AVG_LOGPROB_THRESHOLD = -1.0
 
@@ -40,8 +44,22 @@ def _normalize(text: str) -> str:
     return STRIP_CHARS_PATTERN.sub("", text).lower()
 
 
-def _contains_known_phrase(normalized: str) -> bool:
-    return any(phrase in normalized for phrase in HALLUCINATION_PHRASES)
+def _phrase_covered_indices(normalized: str) -> frozenset[int]:
+    """定型句に一致する文字位置の集合(定型句どうしの重なりも考慮する)"""
+    return frozenset(
+        i
+        for phrase in HALLUCINATION_PHRASES
+        for m in re.finditer(re.escape(phrase), normalized)
+        for i in range(m.start(), m.end())
+    )
+
+
+def _is_known_phrase(normalized: str) -> bool:
+    """定型句を含み、かつ定型句以外の残りがごく短い(文全体がほぼ定型句)か"""
+    covered = _phrase_covered_indices(normalized)
+    if not covered:
+        return False
+    return len(normalized) - len(covered) <= KNOWN_PHRASE_MAX_EXTRA_CHARS
 
 
 def _is_no_speech(no_speech_prob: float | None, avg_logprob: float | None) -> bool:
@@ -51,10 +69,19 @@ def _is_no_speech(no_speech_prob: float | None, avg_logprob: float | None) -> bo
     return avg_logprob is None or avg_logprob < AVG_LOGPROB_THRESHOLD
 
 
-def _has_repeated_sentence(text: str) -> bool:
+def _has_repeated_sentence(text: str, normalized: str) -> bool:
+    """
+    同一文が SENTENCE_REPEAT_THRESHOLD 回以上現れ、かつ反復文がテキストの大半を占めるか。
+    「はい。〜。はい。〜。はい。」のように相づちの間に本物の内容がある区間は捨てない。
+    """
     sentences = [_normalize(s) for s in SENTENCE_SPLIT_PATTERN.split(text)]
     counts = Counter(s for s in sentences if s)
-    return any(c >= SENTENCE_REPEAT_THRESHOLD for c in counts.values())
+    repeated_chars = sum(
+        len(sentence) * count
+        for sentence, count in counts.items()
+        if count >= SENTENCE_REPEAT_THRESHOLD
+    )
+    return repeated_chars > 0 and repeated_chars >= len(normalized) * REPEATED_PATTERN_MIN_RATIO
 
 
 def _has_repeated_pattern(normalized: str) -> bool:
@@ -77,7 +104,7 @@ def is_hallucination(
         return True
     return (
         _is_no_speech(no_speech_prob, avg_logprob)
-        or _contains_known_phrase(normalized)
-        or _has_repeated_sentence(text)
+        or _is_known_phrase(normalized)
+        or _has_repeated_sentence(text, normalized)
         or _has_repeated_pattern(normalized)
     )

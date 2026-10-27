@@ -77,3 +77,31 @@ class TestSaveLiveNote:
         blocker.write_text("")
         with pytest.raises(RuntimeError):
             save_live_note(blocker / "child", "本文")
+
+
+class TestSaveLiveNoteNamedAfterWav:
+    """ライブノート名は録音 WAV(開始時刻)に対応させる"""
+
+    def test_name_derived_from_wav_stem(self, tmp_path: Path):
+        wav = tmp_path / "2026-10-27_120000_recording.wav"
+        saved = save_live_note(tmp_path / "notes", "本文", audio_file=wav)
+        assert saved.name == "2026-10-27_120000_live.md"
+
+    def test_numbered_wav_maps_to_same_timestamp(self, tmp_path: Path):
+        wav = tmp_path / "2026-10-27_120000_recording_2.wav"
+        saved = save_live_note(tmp_path, "本文", audio_file=wav)
+        assert saved.name == "2026-10-27_120000_live.md"
+
+    def test_collision_appends_suffix(self, tmp_path: Path):
+        wav = tmp_path / "2026-10-27_120000_recording.wav"
+        first = save_live_note(tmp_path, "一回目", audio_file=wav)
+        second = save_live_note(tmp_path, "二回目", audio_file=wav)
+        third = save_live_note(tmp_path, "三回目", audio_file=wav)
+        assert first.name == "2026-10-27_120000_live.md"
+        assert second.name == "2026-10-27_120000_live_2.md"
+        assert third.name == "2026-10-27_120000_live_3.md"
+        assert first.read_text(encoding="utf-8").rstrip().endswith("一回目")
+
+    def test_arbitrary_wav_name_uses_stem(self, tmp_path: Path):
+        saved = save_live_note(tmp_path, "本文", audio_file=Path("/x/meeting.wav"))
+        assert saved.name == "meeting_live.md"

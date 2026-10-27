@@ -81,3 +81,33 @@ def test_sentence_repeated_twice_is_not_hallucination():
 def test_repeated_short_pattern_is_hallucination():
     """短いパターンの連続反復は幻覚"""
     assert is_hallucination("あのあのあのあのあのあのあの") is True
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "はい。来週のリリースは金曜日に決定しました。はい。担当は田中さんです。はい。",
+        "そうですね。予算は300万円です。そうですね。期限は来月末。そうですね。",
+    ],
+)
+def test_repeated_filler_with_real_content_is_not_hallucination(text):
+    """相づちが3回以上でも、本物の内容が大半を占める区間は捨てない"""
+    assert is_hallucination(text) is False
+
+
+def test_pure_repeated_thanks_is_hallucination():
+    """同一文だけの反復は幻覚のまま"""
+    text = "ありがとうございました。ありがとうございました。ありがとうございました。"
+    assert is_hallucination(text) is True
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "YouTubeのチャンネル登録者数が先月から倍になったので来期の広告予算を見直します。",
+        "字幕作成の外注費が高いので、来月から社内で対応する方向で調整しています。",
+    ],
+)
+def test_long_utterance_containing_known_phrase_is_not_hallucination(text):
+    """定型句を含んでも、文全体がほぼ定型句でない長い発話は捨てない"""
+    assert is_hallucination(text) is False

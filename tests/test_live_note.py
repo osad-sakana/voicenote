@@ -2,7 +2,9 @@
 
 from pathlib import Path
 
-from live.note import format_timestamp, render_live_note
+import pytest
+
+from live.note import external_send_warning, format_timestamp, render_live_note
 from live.session_models import LiveResult, LiveSegment
 
 
@@ -65,3 +67,36 @@ class TestRenderLiveNote:
     def test_is_pure(self):
         result = _result()
         assert render_live_note(result) == render_live_note(result)
+
+
+class TestExternalSendWarning:
+    @pytest.mark.parametrize(
+        ("transcription_mode", "format_mode"),
+        [("openai", "rule"), ("local", "llm"), ("openai", "llm")],
+    )
+    def test_warns_when_openai_is_used(self, transcription_mode, format_mode):
+        warning = external_send_warning(transcription_mode, format_mode)
+        assert warning is not None
+        assert "OpenAI に送信します" in warning
+        assert "--config" in warning
+        assert "local / rule" in warning
+
+    @pytest.mark.parametrize("format_mode", ["rule", "none"])
+    def test_no_warning_for_local_settings(self, format_mode):
+        assert external_send_warning("local", format_mode) is None
+
+
+class TestRenderLiveNotePrivacy:
+    def test_quality_note_includes_external_send_warning(self):
+        warning = external_send_warning("openai", "rule")
+        body = render_live_note(_result(dropped_chunks=1), send_warning=warning)
+        assert "--file" in body
+        assert warning in body
+
+    def test_local_quality_note_has_no_external_warning(self):
+        body = render_live_note(_result(dropped_chunks=1))
+        assert "OpenAI" not in body
+
+    def test_clean_result_has_no_warning_even_with_openai(self):
+        body = render_live_note(_result(), send_warning=external_send_warning("openai", "llm"))
+        assert "OpenAI" not in body
