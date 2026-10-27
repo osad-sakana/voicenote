@@ -104,3 +104,98 @@ def _encodes_in_shift_jis(char: str) -> bool:
     except UnicodeEncodeError:
         return False
     return True
+
+
+# 実機（qwen2.5:7b）で出力された中国語混入の要約（2例目）。
+# 行内の簡体字比率は 0.12〜0.17 で閾値未満、かつ別の行にかながあるため従来は採用されていた。
+REAL_BROKEN_SUMMARY_MIXED = (
+    "現在の話題: 非エンジニア向けGit入門\n"
+    "\n"
+    "進捗:\n"
+    "- Gitについて简述，指出其为版本管理工具。\n"
+    "- 借助GitHub Desktop进行演示，因为其界面友好适合非技术人员使用。通常操作是通过命令行方式进行。"
+)
+
+# かなを含む日本語の文脈。節単位の判定だけで弾けることを示すために使う
+_JA_CONTEXT = "現在の話題: 非エンジニア向けGit入門\n進捗:\n- Gitについて確認した。"
+
+
+class TestClauseLevelDetection:
+    def test_rejects_real_mixed_summary(self):
+        assert is_plausible_japanese(REAL_BROKEN_SUMMARY_MIXED) is False
+
+    @pytest.mark.parametrize("line", REAL_BROKEN_SUMMARY_MIXED.splitlines()[3:])
+    def test_rejects_each_broken_line_in_japanese_context(self, line):
+        assert is_plausible_japanese(f"{_JA_CONTEXT}\n{line}") is False
+
+    @pytest.mark.parametrize(
+        "clause",
+        ["指出其为版本管理工具", "借助GitHub Desktop进行演示", "因为其界面友好适合非技术人员使用"],
+    )
+    def test_rejects_each_broken_clause_in_japanese_context(self, clause):
+        """かなは他の行にあり、行比率も閾値未満でも、かな無し＋簡体字の節で弾く。"""
+        line = f"- 本日の会議では次の点を確認した。{clause}。以上を共有した"
+        assert simplified_ratio(line) < SIMPLIFIED_LINE_RATIO
+        assert is_plausible_japanese(f"{_JA_CONTEXT}\n{line}") is False
+
+    def test_accepts_kana_clause_with_single_simplified_char_in_long_line(self):
+        """仕様: 節にかながあれば簡体字専用字が混じっても節単位では許容する（行比率ルールのみ適用）。"""
+        line = "- 来期予算案の確認と採用計画の見直しを経てプロジェクト进行中の議事録を共有した"
+        assert simplified_ratio(line) < SIMPLIFIED_LINE_RATIO
+        assert is_plausible_japanese(f"現在の話題: 予算\n{line}") is True
+
+    def test_short_kana_clause_with_simplified_char_still_hits_line_ratio(self):
+        """仕様: 「プロジェクト进行中」単独の行は漢字 3 字中 1 字（約 33%）で行比率ルールにより不採用。"""
+        line = "- プロジェクト进行中"
+        assert simplified_ratio(line) >= SIMPLIFIED_LINE_RATIO
+        assert is_plausible_japanese(f"現在の話題: 予算\n{line}") is False
+
+    def test_accepts_kanji_noun_list_clauses_without_kana(self):
+        """かな無しの節でも簡体字専用字が無ければ弾かない（名詞の列挙など）。"""
+        text = "現在の話題: 定例会議\n進捗:\n- 定例会議、議題整理、予算確認\n- 講義資料を更新した"
+        assert is_plausible_japanese(text) is True
+
+    def test_accepts_realistic_japanese_summary(self):
+        text = (
+            "現在の話題: 新規サービスのランディングページ（LP）改善\n"
+            "\n"
+            "進捗:\n"
+            "- 前回の会議で決めた議題に沿って、講義形式で進捗を共有した。\n"
+            "- GPT-4o を使った要約機能を AWS 上で検証中。\n"
+            "- LP の CVR は 2.5% から 3.1% に改善。次回は A/B テストを実施する。\n"
+            "- 次回定例: 10/30 15:00\n"
+            "- 来期予算案、採用計画、評価制度改定方針を経営会議で承認"
+        )
+        assert is_plausible_japanese(text) is True
+
+
+class TestFullwidthCommaDetection:
+    def test_rejects_comma_line_with_kanji_only_clause(self):
+        """「，」は中国語の強い手がかり。かな無しの漢字節があれば簡体字が無くても弾く。"""
+        line = "- 本件について確認した，借助工具演示"
+        assert is_plausible_japanese(f"{_JA_CONTEXT}\n{line}") is False
+
+    def test_accepts_japanese_sentence_with_fullwidth_comma(self):
+        """全ての節にかながある日本語文は「，」を含んでいても採用する。"""
+        text = "現在の話題: 予算\n- 予算について，来週までに確認します．担当は経理部門です"
+        assert is_plausible_japanese(text) is True
+
+    def test_accepts_many_fullwidth_commas_in_japanese(self):
+        """学術・技術文書風の「，．」を多用した日本語は過検出しない（個数だけでは弾かない）。"""
+        text = "- まず要件を整理し，次に設計を見直し，さらに実装を進め，最後にテストを行った．"
+        assert is_plausible_japanese(text) is True
+
+    def test_accepts_comma_between_alnum_clauses(self):
+        """漢字を含まない節（英数字のみ）はかな無しでも弾かない。"""
+        assert is_plausible_japanese("- AWS，GCP，Azure を比較した") is True
+
+
+class TestAddedSimplifiedChars:
+    @pytest.mark.parametrize("char", list("继续确划适术员简"))
+    def test_review_gaps_are_included(self, char):
+        assert char in SIMPLIFIED_ONLY_CHARS
+
+    @pytest.mark.parametrize("char", list("决准境范源写并尽据数从况段档号"))
+    def test_jis_x_0208_lookalikes_are_excluded(self, char):
+        """JIS X 0208 で符号化できる字は簡体字由来でも含めない。"""
+        assert char not in SIMPLIFIED_ONLY_CHARS
