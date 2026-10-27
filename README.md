@@ -80,6 +80,23 @@ uv run main.py
 uv run main.py --config
 ```
 
+### ライブ文字起こし（`--live`）
+
+録音しながらローカルでリアルタイムに文字起こしし、ローカルLLMで要約を更新します（通信はすべて自マシン内で完結）。
+
+```bash
+uv sync --extra live-mlx    # 任意: Apple Silicon で MLX エンジンを使う場合
+ollama serve                # 任意: 要約用のローカルLLMサーバー
+ollama pull qwen2.5:7b      # 既定の要約モデル
+
+uv run main_cli.py --live
+```
+
+- `Ctrl+C` で終了すると、録音WAV（デスクトップ）と `YYYY-MM-DD_HHMMSS_live.md`（要約+タイムスタンプ付き文字起こし）が保存されます
+- ライブのテキストは速報版です。高精度な全文は `uv run main_cli.py --file <WAVのパス>` で再文字起こししてください
+- Ollama が起動していない・モデルが無い場合は要約なしで続行します。MLX が使えない環境では faster-whisper で動作します
+- エンジン・言語・要約モデル・接続先は `--config` の「ライブ文字起こし設定」で変更できます
+
 ## 出力形式
 
 文字起こし結果は以下の形式でMarkdownノートとして保存されます:

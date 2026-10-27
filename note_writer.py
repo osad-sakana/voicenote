@@ -48,3 +48,36 @@ tags:
         return filepath
     except Exception as e:
         raise RuntimeError(f"保存エラー: {e}") from e
+
+
+def save_live_note(save_folder: Path, body: str) -> Path:
+    """ライブ文字起こし結果を `save_folder/YYYY-MM-DD_HHMMSS_live.md` として保存する。
+
+    Args:
+        save_folder: 保存先フォルダの絶対パス
+        body: ノート本文（frontmatter を除く Markdown）
+
+    Returns:
+        保存されたファイルのパス
+
+    Raises:
+        RuntimeError: 保存失敗時
+    """
+    save_folder = Path(save_folder)
+    now = datetime.now()
+    filepath = save_folder / f"{now.strftime('%Y-%m-%d_%H%M%S')}_live.md"
+    content = f"""---
+created: {now.isoformat()}
+type: live-transcription
+tags:
+  - recording
+  - live
+---
+{body}
+"""
+    try:
+        save_folder.mkdir(parents=True, exist_ok=True)
+        filepath.write_text(content, encoding="utf-8")
+        return filepath
+    except Exception as e:
+        raise RuntimeError(f"保存エラー: {e}") from e

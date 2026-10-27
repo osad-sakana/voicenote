@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from note_writer import save_transcript
+from note_writer import save_live_note, save_transcript
 
 
 class TestSaveTranscript:
@@ -50,3 +50,30 @@ class TestSaveTranscript:
         blocker.write_text("")
         with pytest.raises((RuntimeError, FileExistsError, NotADirectoryError)):
             save_transcript(blocker / "child", "本文")
+
+
+class TestSaveLiveNote:
+    def test_filename_matches_timestamp_live_pattern(self, tmp_path: Path):
+        saved = save_live_note(tmp_path, "本文")
+        assert re.match(r"^\d{4}-\d{2}-\d{2}_\d{6}_live\.md$", saved.name)
+
+    def test_creates_save_folder_if_missing(self, tmp_path: Path):
+        target = tmp_path / "nested"
+        saved = save_live_note(target, "本文")
+        assert saved.parent == target
+
+    def test_frontmatter_and_body(self, tmp_path: Path):
+        content = save_live_note(tmp_path, "ライブ本文").read_text(encoding="utf-8")
+        assert content.startswith("---\n")
+        assert "created:" in content
+        assert "type: live-transcription" in content
+        assert "- recording" in content
+        assert "- live" in content
+        assert "- raw" not in content
+        assert content.rstrip().endswith("ライブ本文")
+
+    def test_raises_runtime_error_on_failure(self, tmp_path: Path):
+        blocker = tmp_path / "blocker"
+        blocker.write_text("")
+        with pytest.raises(RuntimeError):
+            save_live_note(blocker / "child", "本文")

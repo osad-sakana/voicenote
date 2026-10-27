@@ -5,7 +5,17 @@ from pathlib import Path
 
 import pytest
 
-from config import InvalidConfigError, VoiceNoteConfig, load_config, resolve_api_key, save_config
+import config as config_module
+from config import (
+    DEFAULT_LIVE_LLM_BASE_URL,
+    DEFAULT_LIVE_LLM_MODEL,
+    InvalidConfigError,
+    VoiceNoteConfig,
+    configure_live_interactive,
+    load_config,
+    resolve_api_key,
+    save_config,
+)
 
 
 class TestLoadConfig:
@@ -70,6 +80,19 @@ class TestVoiceNoteConfigDefaults:
         assert config.vad_filter is True
         assert config.format_mode == "rule"
         assert config.openai_api_key is None
+        assert config.live_engine == "faster-whisper"
+        assert config.live_whisper_model == "small"
+        assert config.live_language == ""
+        assert config.live_vad == "energy"
+        assert config.live_llm_enabled is True
+        assert config.live_llm_base_url == "http://127.0.0.1:11434/v1"
+        assert config.live_llm_model == "qwen2.5:7b"
+        assert config.live_summary_interval_sec == 45
+
+    def test_live_defaults_are_exposed_as_constants(self):
+        config = VoiceNoteConfig()
+        assert config.live_llm_base_url == DEFAULT_LIVE_LLM_BASE_URL
+        assert config.live_llm_model == DEFAULT_LIVE_LLM_MODEL
 
 
 class TestRecordingFolder:
@@ -188,3 +211,85 @@ class TestResolveApiKey:
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         config = VoiceNoteConfig()
         assert resolve_api_key(config) is None
+
+
+class TestLiveConfigPersistence:
+    def test_legacy_config_without_live_keys_uses_defaults(self, tmp_path: Path):
+        path = tmp_path / "config.json"
+        path.write_text(json.dumps({"save_folder": "/tmp/x"}), encoding="utf-8")
+        loaded = load_config(path)
+        assert loaded is not None
+        assert loaded == VoiceNoteConfig(save_folder="/tmp/x")
+
+    def test_live_fields_round_trip(self, tmp_path: Path):
+        path = tmp_path / "config.json"
+        original = VoiceNoteConfig(
+            save_folder="/tmp/x",
+            live_engine="mlx",
+            live_whisper_model="large-v3-turbo",
+            live_language="ja",
+            live_vad="silero",
+            live_llm_enabled=False,
+            live_llm_base_url="http://localhost:8080/v1",
+            live_llm_model="qwen3:8b",
+            live_summary_interval_sec=60,
+        )
+        save_config(path, original)
+        assert load_config(path) == original
+
+    def test_unknown_live_like_keys_are_ignored(self):
+        config = VoiceNoteConfig.from_dict({"save_folder": "/tmp", "live_unknown": 1})
+        assert config == VoiceNoteConfig(save_folder="/tmp")
+
+
+def _fake_prompts(monkeypatch, answers: list[str]) -> list[str]:
+    """Prompt.ask を順番に answers を返すスタブに差し替え、質問文の記録を返す"""
+    asked: list[str] = []
+    remaining = list(answers)
+
+    def fake_ask(question, *args, **kwargs):
+        asked.append(question)
+        return remaining.pop(0)
+
+    monkeypatch.setattr(config_module.Prompt, "ask", staticmethod(fake_ask))
+    return asked
+
+
+class TestConfigureLiveInteractive:
+    def test_skip_returns_empty_overrides(self, monkeypatch):
+        _fake_prompts(monkeypatch, ["n"])
+        assert configure_live_interactive() == {}
+
+    def test_collects_live_settings(self, monkeypatch):
+        _fake_prompts(monkeypatch, ["y", "1", "ja", "qwen3:8b", "http://localhost:11434/v1"])
+        overrides = configure_live_interactive()
+        assert overrides == {
+            "live_engine": "mlx",
+            "live_language": "ja",
+            "live_llm_model": "qwen3:8b",
+            "live_llm_base_url": "http://localhost:11434/v1",
+        }
+
+    def test_faster_whisper_choice_and_auto_language(self, monkeypatch):
+        _fake_prompts(
+            monkeypatch, ["y", "2", "auto", DEFAULT_LIVE_LLM_MODEL, DEFAULT_LIVE_LLM_BASE_URL]
+        )
+        overrides = configure_live_interactive()
+        assert overrides["live_engine"] == "faster-whisper"
+        assert overrides["live_language"] == ""
+
+    def test_invalid_engine_choice_is_reasked(self, monkeypatch):
+        asked = _fake_prompts(
+            monkeypatch, ["y", "9", "2", "", DEFAULT_LIVE_LLM_MODEL, DEFAULT_LIVE_LLM_BASE_URL]
+        )
+        overrides = configure_live_interactive()
+        assert overrides["live_engine"] == "faster-whisper"
+        assert len(asked) == 6
+
+    def test_non_loopback_base_url_is_reasked(self, monkeypatch):
+        _fake_prompts(
+            monkeypatch,
+            ["y", "2", "", "qwen2.5:7b", "http://example.com/v1", "http://127.0.0.1:11434/v1"],
+        )
+        overrides = configure_live_interactive()
+        assert overrides["live_llm_base_url"] == "http://127.0.0.1:11434/v1"
