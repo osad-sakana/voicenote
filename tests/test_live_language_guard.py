@@ -7,6 +7,7 @@ from live.language_guard import (
     SIMPLIFIED_ONLY_CHARS,
     is_plausible_japanese,
     simplified_ratio,
+    split_clauses,
 )
 
 # 実機（qwen2.5:7b）で出力された中国語混入の要約
@@ -170,9 +171,28 @@ class TestClauseLevelDetection:
 
 
 class TestFullwidthCommaDetection:
-    def test_rejects_comma_line_with_kanji_only_clause(self):
-        """「，」は中国語の強い手がかり。かな無しの漢字節があれば簡体字が無くても弾く。"""
-        line = "- 本件について確認した，借助工具演示"
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "背景，目的，手法について議論した．",
+            "- 議題：予算，日程，担当者を確認した",
+            "- 担当：田中，佐藤",
+            "- 決定事項，担当：田中",
+            "- 数値は1,000件，2,000件と推移した",
+        ],
+    )
+    def test_accepts_kanji_only_clauses_with_fullwidth_comma(self, line):
+        """回帰: かな無しの漢字だけの節（名詞の列挙・人名など）は「，」があっても弾かない。"""
+        assert is_plausible_japanese(f"{_JA_CONTEXT}\n{line}\n- 以上を共有した。") is True
+
+    def test_accepts_kanji_only_clauses_with_japanese_shared_function_chars(self):
+        """「的」「是」「了」は日本語でも使うため、かな無しの節にあっても根拠にしない。"""
+        line = "- 具体的，是正措置，作業完了"
+        assert is_plausible_japanese(f"{_JA_CONTEXT}\n{line}") is True
+
+    def test_rejects_comma_line_with_simplified_clause(self):
+        """「，」の有無に関わらず、かな無し＋簡体字専用字の節は節規則で弾く。"""
+        line = "- 本件について確認した，借助工具进行演示"
         assert is_plausible_japanese(f"{_JA_CONTEXT}\n{line}") is False
 
     def test_accepts_japanese_sentence_with_fullwidth_comma(self):
@@ -199,3 +219,25 @@ class TestAddedSimplifiedChars:
     def test_jis_x_0208_lookalikes_are_excluded(self, char):
         """JIS X 0208 で符号化できる字は簡体字由来でも含めない。"""
         assert char not in SIMPLIFIED_ONLY_CHARS
+
+
+class TestSplitClauses:
+    def test_splits_on_japanese_punctuation(self):
+        assert split_clauses("予算、日程。担当") == ("予算", "日程", "担当")
+
+    def test_splits_on_fullwidth_comma_and_period(self):
+        assert split_clauses("背景，目的．手法") == ("背景", "目的", "手法")
+
+    @pytest.mark.parametrize("text", ["1,000件", "1.5倍", "v1.2で対応"])
+    def test_does_not_split_ascii_comma_or_period_between_digits(self, text):
+        """数字に挟まれた半角「,」「.」は桁区切り・小数点なので分割しない。"""
+        assert split_clauses(text) == (text,)
+
+    def test_splits_ascii_comma_and_period_not_between_digits(self):
+        assert split_clauses("简述,指出其为工具.以上") == ("简述", "指出其为工具", "以上")
+
+    def test_drops_empty_clauses(self):
+        assert split_clauses("、。予算，") == ("予算",)
+
+    def test_returns_tuple(self):
+        assert isinstance(split_clauses("予算、日程"), tuple)

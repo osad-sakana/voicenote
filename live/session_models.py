@@ -15,11 +15,12 @@ from config import (
     DEFAULT_LIVE_SUMMARY_INTERVAL_SEC,
     DEFAULT_LIVE_VAD,
     DEFAULT_LIVE_WHISPER_MODEL,
+    LIVE_VAD_CHOICES,
 )
 from live.segmenter import DEFAULT_SAMPLE_RATE
 
 SUPPORTED_ENGINES = frozenset({"faster-whisper", "mlx"})
-SUPPORTED_VADS = frozenset({"energy", "silero"})
+SUPPORTED_VADS = frozenset(LIVE_VAD_CHOICES)
 
 
 @dataclass(frozen=True)

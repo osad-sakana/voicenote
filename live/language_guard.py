@@ -6,11 +6,14 @@
 - 漢字を含むのに、ひらがな・カタカナが全く無い（中国語の文章とみなす）
 - 簡体字専用字形の割合（行内の漢字に対する比率）が SIMPLIFIED_LINE_RATIO 以上の行がある
 - 簡体字専用字形を 1 文字でも含み、かつひらがな・カタカナを含まない節がある
-  （節 = 改行と句読点 CLAUSE_DELIMITERS で区切った単位）。節にかなが 1 文字でもあれば
+  （節 = 改行と句読点 CLAUSE_DELIMITERS で区切った単位。ただし数字に挟まれた半角の
+  「,」「.」は桁区切り・小数点とみなして区切らない）。節にかなが 1 文字でもあれば
   （日本語文中に引用された中国語の固有名詞など）節単位では許容する
-- 全角カンマ「，」を含む行に、漢字を含みかなを含まない節がある
-  （日本語の要約ではほぼ使われない中国語の強い手がかりとして扱う。
-  「，．」を使う日本語の技術文書もあるため、個数だけでは弾かない）
+
+全角カンマ「，」や漢字だけの節（かな無し）は、それだけでは根拠にしない。
+「背景，目的，手法」「担当：田中，佐藤」のような正当な日本語と区別できないため。
+「的」「是」「了」などの中国語の機能語も、日本語の熟語（具体的・是正・完了）と衝突する
+ので判定に使わない。
 
 英数字・固有名詞だけの行（漢字を含まない行）は判定対象にしない。
 """
@@ -25,10 +28,16 @@ SIMPLIFIED_LINE_RATIO = 0.2
 # 節の区切りとみなす句読点（全角・半角）
 CLAUSE_DELIMITERS: frozenset[str] = frozenset("。、，,．.！？!?；;：:")
 
-# 中国語の強い手がかりとなる全角カンマ（U+FF0C）
-FULLWIDTH_COMMA = "，"
+# 数字に挟まれると桁区切り・小数点になる半角の区切り文字（1,000 / 1.5 / v1.2 は分割しない）
+_NUMERIC_SEPARATORS = ",."
 
-_CLAUSE_SPLIT_PATTERN = re.compile("[" + re.escape("".join(sorted(CLAUSE_DELIMITERS))) + "]")
+_CLAUSE_SPLIT_PATTERN = re.compile(
+    "["
+    + re.escape("".join(sorted(CLAUSE_DELIMITERS - frozenset(_NUMERIC_SEPARATORS))))
+    + "]"
+    + f"|(?<!\\d)[{re.escape(_NUMERIC_SEPARATORS)}]"
+    + f"|[{re.escape(_NUMERIC_SEPARATORS)}](?!\\d)"
+)
 
 # 簡体字専用字形（日本語の新字体と字形が異なるもの）のみの集合。
 # 会・来・与・号・区・参・体 などの日本語と同形の字は含めない。
@@ -82,7 +91,10 @@ def simplified_ratio(line: str) -> float:
 
 
 def split_clauses(line: str) -> tuple[str, ...]:
-    """行を CLAUSE_DELIMITERS で節に分割する（空の節は含めない）。"""
+    """行を CLAUSE_DELIMITERS で節に分割する（空の節は含めない）。
+
+    数字に挟まれた半角の「,」「.」（1,000 や 1.5）では分割しない。
+    """
     return tuple(c for c in _CLAUSE_SPLIT_PATTERN.split(line) if c.strip())
 
 
@@ -95,19 +107,11 @@ def _is_simplified_clause(clause: str) -> bool:
     return any(c in SIMPLIFIED_ONLY_CHARS for c in clause) and not _has_kana(clause)
 
 
-def _is_kanji_only_clause(clause: str) -> bool:
-    """漢字を含み、かなを含まない節なら True。"""
-    return any(_is_han(c) for c in clause) and not _has_kana(clause)
-
-
 def _is_plausible_line(line: str) -> bool:
-    """1 行が日本語として妥当なら True（行比率・節・全角カンマの各ルールで判定）。"""
+    """1 行が日本語として妥当なら True（行比率・節の各ルールで判定）。"""
     if simplified_ratio(line) >= SIMPLIFIED_LINE_RATIO:
         return False
-    clauses = split_clauses(line)
-    if any(_is_simplified_clause(c) for c in clauses):
-        return False
-    return not (FULLWIDTH_COMMA in line and any(_is_kanji_only_clause(c) for c in clauses))
+    return not any(_is_simplified_clause(c) for c in split_clauses(line))
 
 
 def is_plausible_japanese(text: str) -> bool:
