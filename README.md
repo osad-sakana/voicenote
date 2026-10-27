@@ -80,6 +80,27 @@ uv run main.py
 uv run main.py --config
 ```
 
+### ライブ文字起こし（`--live`）
+
+録音しながらローカルでリアルタイムに文字起こしし、ローカルLLMで要約を更新します（通信はすべて自マシン内で完結）。
+
+```bash
+uv sync --extra live-mlx    # 任意: Apple Silicon で MLX エンジンを使う場合
+ollama serve                # 任意: 要約用のローカルLLMサーバー
+ollama pull qwen2.5:7b      # 既定の要約モデル
+
+uv run main_cli.py --live
+```
+
+- `Ctrl+C` で終了すると、録音WAV（デスクトップ）と `YYYY-MM-DD_HHMMSS_live.md`（要約+タイムスタンプ付き文字起こし）が保存されます。ノート名の時刻は録音WAVの開始時刻と同じです（同名があれば `_2`, `_3`, ...）
+- 終了後の要約作成中にもう一度 `Ctrl+C` を押すと、ライブノートを作らずに終了します（WAVは保存済み）
+- ライブのテキストは速報版です。高精度な全文は `uv run main_cli.py --file <WAVのパス>` で再文字起こししてください。`--config` で OpenAI 文字起こし / LLM 整形を選んでいる場合、この再文字起こしは音声・本文を OpenAI に送信します
+- Ollama が起動していない・モデルが無い場合は要約なしで続行します。MLX が使えない環境では faster-whisper で動作します
+- エンジン・モデル・VAD（音声区間検出）・言語・要約モデル・接続先は `--config` の「ライブ文字起こし設定」で変更できます
+- VAD の既定は `silero` です。マイク入力が小さい環境では `energy`（音量しきい値方式）は発話を取りこぼしやすく、実測では発話の約7割を検出できませんでした。Silero VAD を読み込めない場合は警告を表示して `energy` で続行します
+- **推奨設定（Apple Silicon）**: `uv sync --extra live-mlx` を実行し、`--config` のライブ文字起こし設定でエンジン `mlx` とモデル `large-v3-turbo`（mlx 選択時の既定値）を選んでください。small より明確に高精度で、区間あたりの遅延は中央値で約1.5秒です（M1 16GB 実測。音声が崩れた区間では10秒前後かかることがあります）。MLX が使えない環境では自動で faster-whisper + `small` に切り替わります（faster-whisper の CPU 実行では large-v3-turbo は遅すぎて実時間に追いつきません）
+- マイクの入力レベルが低いと認識精度が大きく落ちます。OS のサウンド設定で入力音量を上げてください
+
 ## 出力形式
 
 文字起こし結果は以下の形式でMarkdownノートとして保存されます:

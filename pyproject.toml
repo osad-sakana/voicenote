@@ -12,10 +12,14 @@ dependencies = [
     "numpy",
     "rich",
     "openai>=1.0.0",
+    "httpx",
     "python-dotenv",
     "customtkinter",
     "tkinterdnd2>=0.6.2",
 ]
+
+[project.optional-dependencies]
+live-mlx = ["mlx-whisper; sys_platform == 'darwin' and platform_machine == 'arm64'"]
 
 [project.scripts]
 voicenote = "main:main"
@@ -33,8 +37,9 @@ py-modules = [
     "formatter",
     "logging_setup",
     "pipeline",
+    "live_cli",
 ]
-packages = ["gui"]
+packages = ["gui", "live"]
 
 [dependency-groups]
 dev = [
@@ -46,6 +51,10 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
+markers = [
+    "mlx: Apple Silicon の MLX 実機が必要なテスト（デフォルトでは skip）",
+    "ollama: 実機 Ollama サーバーが必要なテスト（VOICENOTE_RUN_OLLAMA=1 のときのみ実行）",
+]
 
 [tool.ruff]
 line-length = 100

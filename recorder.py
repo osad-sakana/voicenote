@@ -10,6 +10,7 @@ import threading
 from collections.abc import Callable
 from pathlib import Path
 
+import numpy as np
 import sounddevice as sd
 
 from wav_writer import StreamingWavWriter
@@ -64,10 +65,21 @@ class ThreadedRecorder:
         device_id: int | None = None,
         dest_dir: Path | None = None,
         writer_factory: Callable[[Path, int], StreamingWavWriter] = StreamingWavWriter,
+        chunk_sink: Callable[[np.ndarray], None] | None = None,
     ):
+        """
+        Args:
+            device_id: 入力デバイスID（Noneの場合はデフォルト）
+            dest_dir: 録音WAVファイルの保存先ディレクトリ（Noneの場合はDesktop）
+            writer_factory: WAVライターの生成関数（テスト用に差し替え可能）
+            chunk_sink: 録音チャンクのコピーを受け取るコールバック（リアルタイム文字起こし用）。
+                PortAudio のコールバックスレッドから呼ばれるため、重い処理は行わず
+                キューに積むだけにすること。例外はログに記録して握りつぶす。
+        """
         self._device_id = device_id
         self._dest_dir = dest_dir
         self._writer_factory = writer_factory
+        self._chunk_sink = chunk_sink
         self._writer: StreamingWavWriter | None = None
         self._stream: sd.InputStream | None = None
         self._running = False
@@ -80,6 +92,18 @@ class ThreadedRecorder:
                 writer.write(indata)
             except Exception:
                 _logger.exception("録音コールバックでの書き込みに失敗しました")
+            self._emit_to_sink(indata)
+
+    def _emit_to_sink(self, indata) -> None:
+        """chunk_sink へチャンクのコピーを渡す。WAV 書き込みとは独立して失敗を握りつぶす。"""
+        sink = self._chunk_sink
+        if sink is None:
+            return
+        try:
+            # PortAudio はコールバック後にバッファを再利用するため copy() が必須
+            sink(indata.copy())
+        except Exception:
+            _logger.exception("録音チャンクの chunk_sink への受け渡しに失敗しました")
 
     def start(self):
         dest_dir = self._dest_dir if self._dest_dir is not None else Path.home() / "Desktop"
@@ -165,9 +189,13 @@ def record_audio(
     on_start: Callable[[str], None] | None = None,
     on_stop: Callable[[], None] | None = None,
     on_saved: Callable[[Path], None] | None = None,
+    chunk_sink: Callable[[np.ndarray], None] | None = None,
 ) -> Path:
     """
     音声を録音する（CLI用・Ctrl+Cで停止）
+
+    録音中だけ SIGINT ハンドラを差し替え、戻る時（例外時を含む）に元のハンドラへ復元する。
+    そのため戻った後の Ctrl+C は通常どおり KeyboardInterrupt になる。
 
     Args:
         device: 入力デバイス名またはID（Noneの場合はデフォルト）
@@ -177,6 +205,7 @@ def record_audio(
         on_saved: 録音データがWAVファイルとして確定した直後に呼ばれるコールバック。
             PortAudio の停止処理がハングしても、この時点で既にファイルは
             ディスク上に存在する。
+        chunk_sink: 録音チャンクのコピーを受け取るコールバック（ThreadedRecorder へ素通し）
 
     Returns:
         保存されたWAVファイルのパス
@@ -187,7 +216,7 @@ def record_audio(
     """
     device_id = resolve_device_id(device)
 
-    recorder = ThreadedRecorder(device_id, dest_dir)
+    recorder = ThreadedRecorder(device_id, dest_dir, chunk_sink=chunk_sink)
     stop_event = threading.Event()
 
     def _signal_handler(sig, frame):
@@ -195,8 +224,25 @@ def record_audio(
             on_stop()
         stop_event.set()
 
-    signal.signal(signal.SIGINT, _signal_handler)
+    prev_handler = signal.signal(signal.SIGINT, _signal_handler)
+    try:
+        return _record_until_stopped(recorder, stop_event, device_id, on_start, on_saved)
+    finally:
+        # WAV 確定・ストリーム停止まで終えてから元のハンドラへ戻す。早く戻すと、
+        # 2回目の Ctrl+C で WAV の確定処理が KeyboardInterrupt に中断されうるため。
+        # None は Python 外で設定されたハンドラを意味し、signal.signal には渡せない。
+        if prev_handler is not None:
+            signal.signal(signal.SIGINT, prev_handler)
 
+
+def _record_until_stopped(
+    recorder: ThreadedRecorder,
+    stop_event: threading.Event,
+    device_id: int | None,
+    on_start: Callable[[str], None] | None,
+    on_saved: Callable[[Path], None] | None,
+) -> Path:
+    """録音を開始し、停止要求を待ってから WAV を確定 → ストリームを停止する"""
     device_name = sd.query_devices(device_id)["name"] if device_id is not None else "デフォルト"
     if on_start:
         on_start(device_name)

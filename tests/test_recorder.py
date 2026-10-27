@@ -4,6 +4,7 @@ import threading
 import time
 import wave
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -284,3 +285,283 @@ class TestThreadedRecorderStartStop:
             assert f.getnframes() == expected_frames
 
         recorder.finalize_recording()
+
+
+def _start_with_fake_stream(monkeypatch, tmp_path, chunk_sink=None, writer_factory=None):
+    """FakeInputStream で recorder.start() を駆動するヘルパー。"""
+    import recorder as recorder_module
+
+    monkeypatch.setattr(recorder_module.sd, "InputStream", FakeInputStream)
+    kwargs = {"dest_dir": tmp_path, "chunk_sink": chunk_sink}
+    if writer_factory is not None:
+        kwargs["writer_factory"] = writer_factory
+    recorder = ThreadedRecorder(**kwargs)
+    recorder.start()
+    return recorder
+
+
+def _fake_writer_factory(holder: dict):
+    def factory(dest, rate):
+        writer = FakeWriter(dest, rate)
+        holder["writer"] = writer
+        return writer
+
+    return factory
+
+
+class TestChunkSink:
+    def test_sink_receives_copy_of_chunk(self, tmp_path, monkeypatch):
+        """sink にはコピーが渡る (PortAudio のバッファ再利用で中身が変わらない)。"""
+        received: list[np.ndarray] = []
+        holder: dict = {}
+        _start_with_fake_stream(
+            monkeypatch,
+            tmp_path,
+            chunk_sink=received.append,
+            writer_factory=_fake_writer_factory(holder),
+        )
+
+        chunk = np.full((160, 1), 0.5, dtype=np.float32)
+        FakeInputStream.last_instance.callback(chunk, 160, None, None)
+        chunk[:] = -1.0  # PortAudio によるバッファ再利用を模擬
+
+        # start() 中の1回 + 手動の1回
+        assert len(received) == 2
+        assert received[1] is not chunk
+        assert np.all(received[1] == 0.5)
+
+    def test_sink_exception_does_not_affect_writer(self, tmp_path, monkeypatch):
+        """sink が例外を出しても writer へ書かれるフレームは sink なしと同一。"""
+
+        def failing_sink(chunk):
+            raise RuntimeError("sink failure")
+
+        chunks = [np.full((160, 1), i / 10, dtype=np.float32) for i in range(3)]
+
+        def run(sink):
+            holder: dict = {}
+            _start_with_fake_stream(
+                monkeypatch,
+                tmp_path,
+                chunk_sink=sink,
+                writer_factory=_fake_writer_factory(holder),
+            )
+            for chunk in chunks:
+                FakeInputStream.last_instance.callback(chunk, 160, None, None)
+            return holder["writer"].frames
+
+        with_sink = run(failing_sink)
+        without_sink = run(None)
+
+        assert len(with_sink) == len(without_sink) == 4
+        for a, b in zip(with_sink, without_sink, strict=True):
+            np.testing.assert_array_equal(a, b)
+
+    def test_sink_called_after_writer_write(self, tmp_path, monkeypatch):
+        """writer.write() が先、sink が後に呼ばれる。"""
+        order: list[str] = []
+        holder: dict = {}
+
+        class OrderedWriter(FakeWriter):
+            def write(self, chunk):
+                order.append("write")
+                super().write(chunk)
+
+        def factory(dest, rate):
+            writer = OrderedWriter(dest, rate)
+            holder["writer"] = writer
+            return writer
+
+        _start_with_fake_stream(
+            monkeypatch,
+            tmp_path,
+            chunk_sink=lambda c: order.append("sink"),
+            writer_factory=factory,
+        )
+        assert order == ["write", "sink"]
+
+    def test_sink_still_called_when_writer_write_fails(self, tmp_path, monkeypatch):
+        """writer の書き込み失敗は sink 呼び出しを妨げない (別 try/except)。"""
+        received: list[np.ndarray] = []
+
+        class FailingWriter(FakeWriter):
+            def write(self, chunk):
+                raise OSError("disk full")
+
+        _start_with_fake_stream(
+            monkeypatch,
+            tmp_path,
+            chunk_sink=received.append,
+            writer_factory=lambda dest, rate: FailingWriter(dest, rate),
+        )
+        assert len(received) == 1
+
+    def test_sink_not_called_after_finalize(self, tmp_path, monkeypatch):
+        received: list[np.ndarray] = []
+        recorder = _start_with_fake_stream(
+            monkeypatch,
+            tmp_path,
+            chunk_sink=received.append,
+            writer_factory=lambda dest, rate: FakeWriter(dest, rate),
+        )
+        recorder.finalize_recording()
+        FakeInputStream.last_instance.callback(
+            np.zeros((160, 1), dtype=np.float32), 160, None, None
+        )
+        assert len(received) == 1
+
+    def test_no_sink_keeps_existing_behavior(self, tmp_path, monkeypatch):
+        holder: dict = {}
+        _start_with_fake_stream(
+            monkeypatch,
+            tmp_path,
+            chunk_sink=None,
+            writer_factory=_fake_writer_factory(holder),
+        )
+        FakeInputStream.last_instance.callback(
+            np.zeros((160, 1), dtype=np.float32), 160, None, None
+        )
+        assert len(holder["writer"].frames) == 2
+
+    def test_real_writer_output_identical_with_and_without_sink(self, tmp_path, monkeypatch):
+        """実 StreamingWavWriter で sink あり/なしの WAV フレーム数・内容が一致する。"""
+        rng = np.random.default_rng(0)
+        chunks = [rng.uniform(-1, 1, (1600, 1)).astype(np.float32) for _ in range(5)]
+
+        def run(subdir: str, sink):
+            dest = tmp_path / subdir
+            recorder = _start_with_fake_stream(monkeypatch, dest, chunk_sink=sink)
+            for chunk in chunks:
+                FakeInputStream.last_instance.callback(chunk, 1600, None, None)
+            path = recorder.finalize_recording()
+            with wave.open(str(path), "rb") as f:
+                return f.getnframes(), f.readframes(f.getnframes())
+
+        received: list[np.ndarray] = []
+        frames_with, data_with = run("with", received.append)
+        frames_without, data_without = run("without", None)
+
+        assert frames_with == frames_without == 160 + 1600 * 5
+        assert data_with == data_without
+        assert len(received) == 6
+
+
+class TestRecordAudioChunkSink:
+    def _patch(self, monkeypatch, captured: dict):
+        import recorder as recorder_module
+
+        class SpyRecorder:
+            def __init__(self, device_id=None, dest_dir=None, chunk_sink=None, **kwargs):
+                captured["chunk_sink"] = chunk_sink
+                captured["calls"] = []
+
+            def start(self):
+                captured["calls"].append("start")
+
+            def finalize_recording(self, timeout=2.0):
+                captured["calls"].append("finalize")
+                return Path("/tmp/fake.wav")
+
+            def stop_with_timeout(self, timeout=5.0):
+                captured["calls"].append("stop")
+                return True
+
+        class ImmediateEvent:
+            def set(self):
+                pass
+
+            def wait(self):
+                return True
+
+        monkeypatch.setattr(recorder_module, "ThreadedRecorder", SpyRecorder)
+        monkeypatch.setattr(recorder_module, "threading", SimpleNamespace(Event=ImmediateEvent))
+        monkeypatch.setattr(recorder_module.signal, "signal", lambda *a, **kw: None)
+        return recorder_module
+
+    def test_record_audio_passes_chunk_sink(self, monkeypatch):
+        captured: dict = {}
+        recorder_module = self._patch(monkeypatch, captured)
+
+        def sink(chunk):
+            pass
+
+        result = recorder_module.record_audio(chunk_sink=sink)
+
+        assert result == Path("/tmp/fake.wav")
+        assert captured["chunk_sink"] is sink
+        # finalize_recording() → stop_with_timeout() の順序は維持
+        assert captured["calls"] == ["start", "finalize", "stop"]
+
+    def test_record_audio_default_sink_is_none(self, monkeypatch):
+        captured: dict = {}
+        recorder_module = self._patch(monkeypatch, captured)
+
+        recorder_module.record_audio()
+
+        assert captured["chunk_sink"] is None
+
+
+class TestRecordAudioRestoresSigint:
+    """record_audio は終了時に元の SIGINT ハンドラへ必ず戻す"""
+
+    PREV = object()
+
+    def _patch(self, monkeypatch, finalize_result):
+        import recorder as recorder_module
+
+        calls: list[tuple] = []
+
+        def fake_signal(signum, handler):
+            calls.append((signum, handler))
+            return self.PREV
+
+        class SpyRecorder:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def start(self):
+                pass
+
+            def finalize_recording(self, timeout=2.0):
+                return finalize_result
+
+            def stop_with_timeout(self, timeout=5.0):
+                return True
+
+        class ImmediateEvent:
+            def set(self):
+                pass
+
+            def wait(self):
+                return True
+
+        monkeypatch.setattr(recorder_module, "ThreadedRecorder", SpyRecorder)
+        monkeypatch.setattr(recorder_module, "threading", SimpleNamespace(Event=ImmediateEvent))
+        monkeypatch.setattr(recorder_module.signal, "signal", fake_signal)
+        return recorder_module, calls
+
+    def test_restores_previous_handler_on_success(self, monkeypatch):
+        import signal as signal_module
+
+        recorder_module, calls = self._patch(monkeypatch, Path("/tmp/fake.wav"))
+        recorder_module.record_audio()
+        assert len(calls) == 2
+        assert calls[0][0] == signal_module.SIGINT
+        assert calls[0][1] is not self.PREV
+        assert calls[-1] == (signal_module.SIGINT, self.PREV)
+
+    def test_restores_previous_handler_on_error(self, monkeypatch):
+        import signal as signal_module
+
+        recorder_module, calls = self._patch(monkeypatch, None)
+        with pytest.raises(RuntimeError):
+            recorder_module.record_audio()
+        assert calls[-1] == (signal_module.SIGINT, self.PREV)
+
+    def test_skips_restore_when_previous_handler_unknown(self, monkeypatch):
+        recorder_module, calls = self._patch(monkeypatch, Path("/tmp/fake.wav"))
+        monkeypatch.setattr(
+            recorder_module.signal, "signal", lambda signum, handler: calls.append(handler)
+        )
+        recorder_module.record_audio()
+        assert len(calls) == 1  # 前のハンドラが None(Python 外で設定)なら戻さない

@@ -70,6 +70,9 @@ def main():
         "--list-devices", action="store_true", help="利用可能なオーディオデバイス一覧を表示"
     )
     parser.add_argument("--device", type=str, help="録音に使用するデバイス（名前またはID）")
+    parser.add_argument(
+        "--live", action="store_true", help="録音しながらリアルタイムに文字起こし・要約する"
+    )
     args = parser.parse_args()
 
     if args.list_devices:
@@ -80,6 +83,10 @@ def main():
         console.print("[red]エラー: --fileと--record-onlyは同時に指定できません[/red]")
         sys.exit(1)
 
+    if args.live and (args.file or args.record_only):
+        console.print("[red]エラー: --liveは--file/--record-onlyと同時に指定できません[/red]")
+        sys.exit(1)
+
     setup_logging()
     try:
         config = load_or_configure(force_config=args.config)
@@ -87,6 +94,18 @@ def main():
         console.print(f"[red]{e}[/red]")
         sys.exit(1)
     desktop = Path.home() / "Desktop"
+
+    if args.config:
+        # --config は設定の保存だけを行い、録音は始めない
+        console.print("[green]✓ 設定を保存しました[/green]")
+        return
+
+    if args.live:
+        # ライブ用の依存（音声認識エンジン・LLMクライアント）は --live のときだけ読み込む
+        import live_cli
+
+        live_cli.run_live(config, args.device, desktop)
+        return
 
     if args.file:
         audio_file = Path(args.file)
@@ -150,6 +169,12 @@ def main():
 
     try:
         saved_path = _run_transcription(audio_file, config)
+    except KeyboardInterrupt:
+        # record_audio が SIGINT ハンドラを復元するため、文字起こし中の Ctrl+C はここに来る
+        console.print(
+            f"\n[yellow]文字起こしを中断しました（音声は保存済み）: {audio_file.absolute()}[/yellow]"
+        )
+        sys.exit(130)
     except Exception as e:
         console.print(f"[red]{e}[/red]")
         sys.exit(1)

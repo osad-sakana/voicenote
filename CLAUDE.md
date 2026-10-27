@@ -36,7 +36,23 @@ uv run main.py --list-devices
 # Record from specific device (name or ID)
 uv run main.py --device "BlackHole 2ch"
 uv run main.py --device 2
+
+# Live mode: record + real-time local transcription + rolling local-LLM summary (CLI only)
+uv run main_cli.py --live
+uv run main_cli.py --live --device "BlackHole 2ch"
 ```
+
+Live mode setup (all local, nothing leaves the machine):
+
+```bash
+uv sync --extra live-mlx      # optional: MLX engine on Apple Silicon (falls back to faster-whisper)
+ollama serve                  # local LLM server for summaries (optional)
+ollama pull qwen2.5:7b        # default summary model (live_llm_model)
+```
+
+`--live` cannot be combined with `--file` or `--record-only`. Live settings (`live_*` keys in config.json) are asked in an optional section of `--config`; old config files without them load with defaults (`faster-whisper` + `small`).
+
+Recommended on Apple Silicon: `uv sync --extra live-mlx`, then in `--config` choose engine `mlx` — the model prompt then defaults to `large-v3-turbo` (`config.default_live_model_for`; the global default stays `small`). Measured on M1 16GB: mlx large-v3-turbo is clearly more accurate than small at p50 ~1.5s per segment, while faster-whisper (CPU int8) large-v3-turbo is not real-time (p50 5.4–9.7s, RTF 3–4), so when mlx falls back to faster-whisper, `turbo` / `large-v3-turbo` are replaced with `small` (`live_cli.CPU_UNSUITABLE_MODELS`). Low microphone input level noticeably hurts accuracy — raise the input volume.
 
 Dependencies are managed in `pyproject.toml`. Use `uv sync` to install dependencies, or `uv run` which automatically syncs before running.
 
@@ -54,6 +70,13 @@ Dependencies are managed in `pyproject.toml`. Use `uv sync` to install dependenc
 - **transcriber.py**: Whisper model loading and transcription with progress indicators
 - **formatter.py**: Rule-based and LLM-based transcription text formatting
 - **note_writer.py**: Markdown note file generation with YAML frontmatter (Obsidian-compatible)
+- **live_cli.py**: `--live` entry (`run_live`) — engine creation with faster-whisper fallback, LLM probe, Rich Live display, recording, live note save. Lazily imported by main_cli.py only when `--live` is given
+- **live/**: Real-time transcription parts
+  - `session.py` (`LiveSession`: segmenter / asr / summary daemon threads), `session_models.py` (`LiveSettings`, `LiveCallbacks`, `LiveSegment`, `LiveResult`)
+  - `framer.py`, `vad.py`, `segmenter.py` (chunk → frame → speech segment), `chunk_queue.py` (drop-newest, for the audio callback), `segment_queue.py` (drop-oldest, for pending segments)
+  - `engines.py` (`create_engine`: faster-whisper / mlx), `hallucination.py` (filters Whisper boilerplate)
+  - `local_llm.py` (loopback-only OpenAI-compatible client, `probe`), `summarizer.py` (`RollingSummarizer`), `language_guard.py` (`is_plausible_japanese`: rejects summaries with Chinese mixed in — Han without any kana, or lines whose Han chars are ≥ `SIMPLIFIED_LINE_RATIO` simplified-only glyphs; the glyph set excludes anything in JIS X 0208)
+  - `note.py` (`render_live_note`, pure), `view.py` (`LiveView`, Rich rendering state)
 - **gui/**: GUI components — App (main window), SettingsDialog, ThreadSafeUIQueue, constants
 
 ### Data Flow
@@ -75,6 +98,12 @@ Both GUI (`main.py`) and CLI (`main_cli.py`) delegate the core workflow to `pipe
 2. **Validation Phase**: entry checks file existence and validates it's a file
 3. **Transcribe + Note Save Phase**: entry → `pipeline.transcribe_and_save` → ... → `{save_folder}/YYYY-MM-DD_HHMMSS_raw.md` (supports WAV, MP3, M4A, etc.)
 
+**Live Mode (CLI `--live`)**:
+1. **Setup Phase**: `LiveSettings.from_config` → `live.engines.create_engine` (mlx unavailable → faster-whisper + warning) → `local_llm.probe` (server down / model missing → continue without summary)
+2. **Recording Phase**: `LiveSession.start()` then `record_audio(chunk_sink=session.feed)`. `feed` only does a non-blocking enqueue; Framer → VAD → Segmenter → engine → hallucination filter run on worker threads, and the summary is held while transcription is behind (`backlog_sec`)
+3. **Stop Phase**: `record_audio` returns (WAV finalized, stream stopped) → `session.stop(timeout)` (flush, drain, one final summary) → `note_writer.save_live_note` → `{save_folder}/YYYY-MM-DD_HHMMSS_live.md` (type: live-transcription, tags: [recording, live])
+4. The user is told to run `uv run main_cli.py --file <wav>` for an accurate full transcript
+
 ### Important Implementation Details
 
 - **Audio Format**: Recording is captured as float32 mono at 16kHz (SAMPLE_RATE constant in recorder.py) and converted to int16 by `wav_writer.float32_to_int16` before being written
@@ -82,6 +111,10 @@ Both GUI (`main.py`) and CLI (`main_cli.py`) delegate the core workflow to `pipe
 - **Audio File Storage**: Recorded WAV files are always saved to Desktop with format `YYYY-MM-DD_HHMMSS_recording.wav` (or `_2`, `_3`, ... if a file with that timestamp already exists). The timestamp reflects when recording *started*, not when it was saved
 - **Transcription Modes**: `local` (faster-whisper, CPU, int8) or `openai` (Whisper API). Mode selected via `--config` when `OPENAI_API_KEY` is set.
 - **Whisper Configuration**: Local mode uses CPU device with int8 compute_type, auto language detection, beam_size=5. OpenAI mode uses whisper-1 model with 25MB file size limit.
+- **Live Mode — WAV is the source of truth**: live text is best-effort (chunks/segments may be dropped under load, engine errors are skipped with a warning). The WAV on Desktop is always complete
+- **Live Mode — stop-order invariant**: "WAV finalized → stream stopped → live drain". Never make WAV finalization wait for the live session; `session.stop()` is called only after `record_audio` returns, and is bounded by a timeout even if the engine or LLM hangs
+- **Live Mode — VAD**: default is `silero` (`DEFAULT_LIVE_VAD`, selectable in `--config`). The energy VAD (-40 dB threshold) misses most speech on quiet input (real 456 s recording at RMS -47 dB: energy 25 segments / 61 s vs silero 56 / 199 s). If Silero fails to load, `create_vad` falls back to `EnergyVAD` and `live_cli` prints a yellow warning (detected via `vad_kind`)
+- **Live Mode — local only**: the summary LLM URL must be loopback (`is_loopback_url`); non-loopback URLs are rejected
 - **Transcription Output**: Markdown files named `YYYY-MM-DD_HHMMSS_raw.md` with YAML frontmatter containing created timestamp, type=transcription, tags=[recording, raw]
 
 ## Code Modification Guidelines

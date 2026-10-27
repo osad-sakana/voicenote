@@ -12,9 +12,27 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Prompt
 
+from live.local_llm import is_loopback_url
+
 console = Console()
 
 CONFIG_PATH = Path.home() / ".config" / "voicenote" / "config.json"
+
+# ライブ文字起こし（--live）の既定値
+DEFAULT_LIVE_ENGINE = "faster-whisper"
+DEFAULT_LIVE_WHISPER_MODEL = "small"
+# --config で mlx を選んだときだけ提示する既定モデル（M1 実測で small より明確に高精度・
+# 区間遅延 p50 約1.5秒で実用範囲）。VoiceNoteConfig / 旧 config.json の既定は small のまま
+DEFAULT_LIVE_MLX_WHISPER_MODEL = "large-v3-turbo"
+_LIVE_ENGINE_DEFAULT_MODELS = {"mlx": DEFAULT_LIVE_MLX_WHISPER_MODEL}
+# 入力が小さい環境(RMS -47dB 程度)でもエネルギーVADより取りこぼしが大幅に少ないため Silero を既定にする
+DEFAULT_LIVE_VAD = "silero"
+# session_models が config を import するため、循環を避けて選択肢はここで定義する
+LIVE_VAD_CHOICES = ("silero", "energy")
+DEFAULT_LIVE_LLM_BASE_URL = "http://127.0.0.1:11434/v1"
+DEFAULT_LIVE_LLM_MODEL = "qwen2.5:7b"
+DEFAULT_LIVE_SUMMARY_INTERVAL_SEC = 45
+LIVE_ENGINE_CHOICES = {"1": "mlx", "2": "faster-whisper"}
 
 
 class InvalidConfigError(Exception):
@@ -32,6 +50,15 @@ class VoiceNoteConfig:
     vad_filter: bool = True
     format_mode: str = "rule"
     openai_api_key: str | None = None
+    # ライブ文字起こし設定（旧 config.json にキーが無ければ既定値が使われる）
+    live_engine: str = DEFAULT_LIVE_ENGINE
+    live_whisper_model: str = DEFAULT_LIVE_WHISPER_MODEL
+    live_language: str = ""  # 空文字は自動判定
+    live_vad: str = DEFAULT_LIVE_VAD
+    live_llm_enabled: bool = True
+    live_llm_base_url: str = DEFAULT_LIVE_LLM_BASE_URL
+    live_llm_model: str = DEFAULT_LIVE_LLM_MODEL
+    live_summary_interval_sec: int = DEFAULT_LIVE_SUMMARY_INTERVAL_SEC
 
     @classmethod
     def from_dict(cls, data: dict) -> "VoiceNoteConfig":
@@ -213,6 +240,8 @@ def configure_interactive() -> VoiceNoteConfig:
         else:
             console.print("[red]✗ 1・2・3のいずれかを入力してください。[/red]")
 
+    live_overrides = configure_live_interactive()
+
     return VoiceNoteConfig(
         save_folder=str(save_folder_path),
         whisper_model=whisper_model,
@@ -220,4 +249,105 @@ def configure_interactive() -> VoiceNoteConfig:
         vad_filter=vad_filter,
         format_mode=format_mode,
         openai_api_key=openai_api_key,
+        **live_overrides,
     )
+
+
+def configure_live_interactive() -> dict:
+    """ライブ文字起こし設定を対話的に入力する（任意）。
+
+    Returns:
+        VoiceNoteConfig に渡す live_* フィールドの dict。スキップ時は空 dict（既定値を使う）。
+    """
+    answer = Prompt.ask(
+        "\n[bold]ライブ文字起こし設定を行いますか？[/bold]", choices=["y", "n"], default="n"
+    )
+    if answer != "y":
+        return {}
+    engine = _ask_live_engine()
+    return {
+        "live_engine": engine,
+        "live_whisper_model": _ask_live_whisper_model(engine),
+        "live_vad": _ask_live_vad(),
+        "live_language": _ask_live_language(),
+        "live_llm_model": _ask_live_llm_model(),
+        "live_llm_base_url": _ask_live_base_url(),
+    }
+
+
+def _ask_live_engine() -> str:
+    """ライブ用の音声認識エンジンを選ばせる"""
+    console.print("\n[bold]ライブ文字起こしのエンジンを選択してください:[/bold]")
+    console.print(
+        "  1. mlx            （Apple Silicon 向け・高速 / uv sync --extra live-mlx が必要）"
+    )
+    console.print("  2. faster-whisper （CPU・どの環境でも動作）")
+    while True:
+        choice = Prompt.ask("[bold]選択[/bold]", default="2")
+        if choice in LIVE_ENGINE_CHOICES:
+            engine = LIVE_ENGINE_CHOICES[choice]
+            console.print(f"[green]✓ エンジン: {engine}[/green]")
+            return engine
+        console.print("[red]✗ 1または2を入力してください。[/red]")
+
+
+def default_live_model_for(engine: str) -> str:
+    """エンジンごとの推奨（対話設定の既定）モデル名を返す。未知のエンジンは全体の既定"""
+    return _LIVE_ENGINE_DEFAULT_MODELS.get(engine, DEFAULT_LIVE_WHISPER_MODEL)
+
+
+def _ask_live_whisper_model(engine: str) -> str:
+    """ライブ用の Whisper モデルを入力させる。既定値はエンジン別。空欄は既定値"""
+    default = default_live_model_for(engine)
+    model = Prompt.ask(
+        "[bold]ライブ用のWhisperモデル[/bold]（例: small, medium, large-v3-turbo）",
+        default=default,
+    ).strip()
+    chosen = model or default
+    console.print(f"[green]✓ モデル: {chosen}[/green]")
+    return chosen
+
+
+def _ask_live_vad() -> str:
+    """ライブ用の VAD（音声区間検出）を選ばせる。不正な入力は再入力"""
+    console.print("\n[bold]ライブ文字起こしの VAD（音声区間検出）を選択してください:[/bold]")
+    console.print("  silero: 入力が小さくても安定(推奨) / energy: 軽量だが入力音量に敏感")
+    while True:
+        choice = (
+            Prompt.ask(f"[bold]VAD ({'/'.join(LIVE_VAD_CHOICES)})[/bold]", default=DEFAULT_LIVE_VAD)
+            .strip()
+            .lower()
+        )
+        if choice in LIVE_VAD_CHOICES:
+            console.print(f"[green]✓ VAD: {choice}[/green]")
+            return choice
+        console.print(f"[red]✗ {' または '.join(LIVE_VAD_CHOICES)} を入力してください。[/red]")
+
+
+def _ask_live_language() -> str:
+    """認識言語を入力させる。空または auto は自動判定（空文字）"""
+    language = Prompt.ask(
+        "[bold]認識言語[/bold]（例: ja, en / 空欄または auto で自動判定）", default=""
+    ).strip()
+    return "" if language.lower() == "auto" else language
+
+
+def _ask_live_llm_model() -> str:
+    """要約に使うローカルLLMのモデル名を入力させる"""
+    return Prompt.ask(
+        "[bold]要約に使うローカルLLMモデル[/bold]", default=DEFAULT_LIVE_LLM_MODEL
+    ).strip()
+
+
+def _ask_live_base_url() -> str:
+    """ローカルLLMの接続先URLを入力させる。ループバック以外は再入力"""
+    while True:
+        url = Prompt.ask(
+            "[bold]ローカルLLMの接続先URL[/bold]", default=DEFAULT_LIVE_LLM_BASE_URL
+        ).strip()
+        if is_loopback_url(url):
+            console.print(f"[green]✓ 接続先: {url}[/green]")
+            return url
+        console.print(
+            "[red]✗ ループバックアドレス（localhost / 127.0.0.1 / ::1）のみ指定できます。[/red]"
+        )
