@@ -50,7 +50,9 @@ ollama serve                  # local LLM server for summaries (optional)
 ollama pull qwen2.5:7b        # default summary model (live_llm_model)
 ```
 
-`--live` cannot be combined with `--file` or `--record-only`. Live settings (`live_*` keys in config.json) are asked in an optional section of `--config`; old config files without them load with defaults.
+`--live` cannot be combined with `--file` or `--record-only`. Live settings (`live_*` keys in config.json) are asked in an optional section of `--config`; old config files without them load with defaults (`faster-whisper` + `small`).
+
+Recommended on Apple Silicon: `uv sync --extra live-mlx`, then in `--config` choose engine `mlx` — the model prompt then defaults to `large-v3-turbo` (`config.default_live_model_for`; the global default stays `small`). Measured on M1 16GB: mlx large-v3-turbo is clearly more accurate than small at p50 ~1.5s per segment, while faster-whisper (CPU int8) large-v3-turbo is not real-time (p50 5.4–9.7s, RTF 3–4), so when mlx falls back to faster-whisper, `turbo` / `large-v3-turbo` are replaced with `small` (`live_cli.CPU_UNSUITABLE_MODELS`). Low microphone input level noticeably hurts accuracy — raise the input volume.
 
 Dependencies are managed in `pyproject.toml`. Use `uv sync` to install dependencies, or `uv run` which automatically syncs before running.
 
@@ -73,7 +75,7 @@ Dependencies are managed in `pyproject.toml`. Use `uv sync` to install dependenc
   - `session.py` (`LiveSession`: segmenter / asr / summary daemon threads), `session_models.py` (`LiveSettings`, `LiveCallbacks`, `LiveSegment`, `LiveResult`)
   - `framer.py`, `vad.py`, `segmenter.py` (chunk → frame → speech segment), `chunk_queue.py` (drop-newest, for the audio callback), `segment_queue.py` (drop-oldest, for pending segments)
   - `engines.py` (`create_engine`: faster-whisper / mlx), `hallucination.py` (filters Whisper boilerplate)
-  - `local_llm.py` (loopback-only OpenAI-compatible client, `probe`), `summarizer.py` (`RollingSummarizer`)
+  - `local_llm.py` (loopback-only OpenAI-compatible client, `probe`), `summarizer.py` (`RollingSummarizer`), `language_guard.py` (`is_plausible_japanese`: rejects summaries with Chinese mixed in — Han without any kana, or lines whose Han chars are ≥ `SIMPLIFIED_LINE_RATIO` simplified-only glyphs; the glyph set excludes anything in JIS X 0208)
   - `note.py` (`render_live_note`, pure), `view.py` (`LiveView`, Rich rendering state)
 - **gui/**: GUI components — App (main window), SettingsDialog, ThreadSafeUIQueue, constants
 

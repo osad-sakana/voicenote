@@ -21,6 +21,10 @@ CONFIG_PATH = Path.home() / ".config" / "voicenote" / "config.json"
 # ライブ文字起こし（--live）の既定値
 DEFAULT_LIVE_ENGINE = "faster-whisper"
 DEFAULT_LIVE_WHISPER_MODEL = "small"
+# --config で mlx を選んだときだけ提示する既定モデル（M1 実測で small より明確に高精度・
+# 区間遅延 p50 約1.5秒で実用範囲）。VoiceNoteConfig / 旧 config.json の既定は small のまま
+DEFAULT_LIVE_MLX_WHISPER_MODEL = "large-v3-turbo"
+_LIVE_ENGINE_DEFAULT_MODELS = {"mlx": DEFAULT_LIVE_MLX_WHISPER_MODEL}
 DEFAULT_LIVE_VAD = "energy"
 DEFAULT_LIVE_LLM_BASE_URL = "http://127.0.0.1:11434/v1"
 DEFAULT_LIVE_LLM_MODEL = "qwen2.5:7b"
@@ -257,8 +261,10 @@ def configure_live_interactive() -> dict:
     )
     if answer != "y":
         return {}
+    engine = _ask_live_engine()
     return {
-        "live_engine": _ask_live_engine(),
+        "live_engine": engine,
+        "live_whisper_model": _ask_live_whisper_model(engine),
         "live_language": _ask_live_language(),
         "live_llm_model": _ask_live_llm_model(),
         "live_llm_base_url": _ask_live_base_url(),
@@ -279,6 +285,23 @@ def _ask_live_engine() -> str:
             console.print(f"[green]✓ エンジン: {engine}[/green]")
             return engine
         console.print("[red]✗ 1または2を入力してください。[/red]")
+
+
+def default_live_model_for(engine: str) -> str:
+    """エンジンごとの推奨（対話設定の既定）モデル名を返す。未知のエンジンは全体の既定"""
+    return _LIVE_ENGINE_DEFAULT_MODELS.get(engine, DEFAULT_LIVE_WHISPER_MODEL)
+
+
+def _ask_live_whisper_model(engine: str) -> str:
+    """ライブ用の Whisper モデルを入力させる。既定値はエンジン別。空欄は既定値"""
+    default = default_live_model_for(engine)
+    model = Prompt.ask(
+        "[bold]ライブ用のWhisperモデル[/bold]（例: small, medium, large-v3-turbo）",
+        default=default,
+    ).strip()
+    chosen = model or default
+    console.print(f"[green]✓ モデル: {chosen}[/green]")
+    return chosen
 
 
 def _ask_live_language() -> str:

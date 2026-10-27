@@ -35,6 +35,9 @@ SESSION_STOP_TIMEOUT_SEC = 120.0
 ERROR_STOP_TIMEOUT_SEC = 2.0
 PROBE_TIMEOUT_SEC = 3.0
 MLX_INSTALL_HINT = "uv sync --extra live-mlx"
+# mlx 向けには実用的だが、faster-whisper(CPU, int8) では実時間に追いつかないモデル
+# (M1 実測2回: large-v3-turbo は区間遅延 p50 5.4〜9.7秒 / RTF 3.0〜4.1。small は p50 2.0〜2.9秒)
+CPU_UNSUITABLE_MODELS = frozenset({"large-v3-turbo", "turbo"})
 
 
 def _engine_api():
@@ -118,8 +121,14 @@ def _create_engine(settings: LiveSettings):
 
 
 def _fallback_model(model: str) -> str:
-    """mlx 向けの HuggingFace リポジトリ指定("/" を含む)は faster-whisper の既定モデルに戻す"""
-    return DEFAULT_LIVE_WHISPER_MODEL if "/" in model else model
+    """フォールバック先 faster-whisper で使うモデル名を返す
+
+    mlx 向けの HuggingFace リポジトリ指定("/" を含む)と、CPU では遅すぎるモデル
+    (CPU_UNSUITABLE_MODELS)は faster-whisper の既定モデルに戻す
+    """
+    if "/" in model or model in CPU_UNSUITABLE_MODELS:
+        return DEFAULT_LIVE_WHISPER_MODEL
+    return model
 
 
 def _create_fallback(create_engine, unavailable_error, settings: LiveSettings):

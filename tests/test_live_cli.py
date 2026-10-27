@@ -225,6 +225,39 @@ class TestEngineFallback:
         live_cli.run_live(config, None, env.dest)
         assert env.created_models[-1] == ("faster-whisper", "medium")
 
+    @pytest.mark.parametrize("model", ["large-v3-turbo", "turbo"])
+    def test_fallback_replaces_turbo_with_default_model(self, env, model):
+        """faster-whisper(CPU) の turbo は実測 RTF 3〜4 で実時間に追いつかないため small に戻す"""
+        env.engine_errors["mlx"] = FakeUnavailable("mlx-whisper がありません")
+        config = VoiceNoteConfig(
+            save_folder=env.config.save_folder, live_engine="mlx", live_whisper_model=model
+        )
+        live_cli.run_live(config, None, env.dest)
+        assert env.created_models == [("mlx", model), ("faster-whisper", "small")]
+        assert env.session_cls.call_args.args[0].model == "small"
+
+    def test_load_time_fallback_replaces_turbo_with_default_model(self, env):
+        config = VoiceNoteConfig(
+            save_folder=env.config.save_folder,
+            live_engine="mlx",
+            live_whisper_model="large-v3-turbo",
+        )
+        live_cli.run_live(config, None, env.dest)
+        engine = env.session_cls.call_args.kwargs["engine"]
+        engine._primary.load.side_effect = FakeUnavailable("download failed")
+        engine.load()
+        assert env.created_models[-1] == ("faster-whisper", "small")
+
+    def test_explicit_faster_whisper_turbo_is_respected(self, env):
+        """faster-whisper を明示的に選んだ場合はフォールバックではないのでモデルを変えない"""
+        config = VoiceNoteConfig(
+            save_folder=env.config.save_folder,
+            live_engine="faster-whisper",
+            live_whisper_model="large-v3-turbo",
+        )
+        live_cli.run_live(config, None, env.dest)
+        assert env.created_models == [("faster-whisper", "large-v3-turbo")]
+
     def test_load_time_fallback_does_not_pass_mlx_repo(self, env):
         config = VoiceNoteConfig(
             save_folder=env.config.save_folder, live_engine="mlx", live_whisper_model=self.MLX_REPO

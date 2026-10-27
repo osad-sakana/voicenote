@@ -1,6 +1,7 @@
 """live.summarizer のユニットテスト。"""
 
 import itertools
+import logging
 import threading
 
 import pytest
@@ -14,6 +15,8 @@ from live.summarizer import (
 )
 
 GOOD_SUMMARY = "現在の話題: 予算の見直し\n進捗:\n- 来期予算の方針を共有した"
+# 実機（qwen2.5:7b）で出力された中国語混入の要約
+CHINESE_MIXED_SUMMARY = "現在の話題: とても簡単だった\n進発:\n- 过去的会议和讲义非常容易理解"
 
 
 class TestBuildMessages:
@@ -29,6 +32,13 @@ class TestBuildMessages:
         user = messages[1]["content"]
         assert "前回の要約" in user
         assert "新しい発言" in user
+
+    def test_system_prompt_enforces_japanese_and_headings(self):
+        system = build_messages("", "発言", max_chars=100)[0]["content"]
+        assert "必ず日本語で出力する" in system
+        assert "中国語・英語で書かない" in system
+        assert "『現在の話題:』『進捗:』をこの表記のまま" in system
+        assert "前回の要約をそのまま返す" in system
 
     def test_empty_prev_summary_is_marked(self):
         user = build_messages("", "発言", max_chars=100)[1]["content"]
@@ -107,6 +117,21 @@ class TestAcceptSummary:
 
     def test_none_new_returns_prev(self):
         assert accept_summary(None, "前回") == "前回"
+
+    def test_chinese_mixed_summary_returns_prev(self):
+        assert accept_summary(CHINESE_MIXED_SUMMARY, GOOD_SUMMARY) == GOOD_SUMMARY
+
+    def test_chinese_mixed_first_summary_returns_empty_prev(self):
+        assert accept_summary(CHINESE_MIXED_SUMMARY, "") == ""
+
+    def test_kanji_dense_japanese_summary_is_accepted(self):
+        summary = (
+            "現在の話題: 会議と講義の議題整理\n"
+            "進捗:\n"
+            "- 前回会議の議題と講義資料の進捗を確認した\n"
+            "- AWS / GPT-4o の検証は来週"
+        )
+        assert accept_summary(summary, "") == summary
 
 
 _BASE = {
@@ -353,7 +378,27 @@ class TestRollingSummarizer:
         with pytest.raises(ValueError):
             _make(FakeBackend(), max_chars=0)
 
-    @pytest.mark.parametrize("bad_output", ["", "<think>x</think>", "   ", "短すぎる"])
+    def test_chinese_summary_keeps_prev_and_warns_without_body(self, caplog):
+        warnings: list[str] = []
+        backend = FakeBackend(responses=[GOOD_SUMMARY, CHINESE_MIXED_SUMMARY])
+        summarizer = _make(backend, on_warning=warnings.append)
+        summarizer.add_text("最初の発言")
+        summarizer.maybe_run(now=0.0)
+        summarizer.add_text("崩れた文字起こし")
+
+        with caplog.at_level(logging.DEBUG, logger="voicenote"):
+            assert summarizer.maybe_run(now=30.0) is False
+        assert summarizer.summary == GOOD_SUMMARY
+        assert summarizer.has_pending_text is True
+        assert len(warnings) == 1
+        assert "日本語" in warnings[0]
+        for text in (warnings[0], caplog.text):
+            assert "过去" not in text
+            assert "崩れた文字起こし" not in text
+
+    @pytest.mark.parametrize(
+        "bad_output", ["", "<think>x</think>", "   ", "短すぎる", CHINESE_MIXED_SUMMARY]
+    )
     def test_rejected_first_summary_keeps_pending(self, bad_output):
         """前回要約が空の初回でも、不正な出力で未要約テキストを失わない。"""
         warnings: list[str] = []

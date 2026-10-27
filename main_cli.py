@@ -95,6 +95,11 @@ def main():
         sys.exit(1)
     desktop = Path.home() / "Desktop"
 
+    if args.config:
+        # --config は設定の保存だけを行い、録音は始めない
+        console.print("[green]✓ 設定を保存しました[/green]")
+        return
+
     if args.live:
         # ライブ用の依存（音声認識エンジン・LLMクライアント）は --live のときだけ読み込む
         import live_cli

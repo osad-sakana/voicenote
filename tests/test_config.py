@@ -9,9 +9,12 @@ import config as config_module
 from config import (
     DEFAULT_LIVE_LLM_BASE_URL,
     DEFAULT_LIVE_LLM_MODEL,
+    DEFAULT_LIVE_MLX_WHISPER_MODEL,
+    DEFAULT_LIVE_WHISPER_MODEL,
     InvalidConfigError,
     VoiceNoteConfig,
     configure_live_interactive,
+    default_live_model_for,
     load_config,
     resolve_api_key,
     save_config,
@@ -237,6 +240,17 @@ class TestLiveConfigPersistence:
         save_config(path, original)
         assert load_config(path) == original
 
+    def test_legacy_mlx_config_without_model_keeps_small(self, tmp_path: Path):
+        """旧 config.json（mlx 指定・モデル未指定）は従来どおり small で読める。"""
+        path = tmp_path / "config.json"
+        path.write_text(
+            json.dumps({"save_folder": "/tmp/x", "live_engine": "mlx"}), encoding="utf-8"
+        )
+        loaded = load_config(path)
+        assert loaded is not None
+        assert loaded.live_engine == "mlx"
+        assert loaded.live_whisper_model == "small"
+
     def test_unknown_live_like_keys_are_ignored(self):
         config = VoiceNoteConfig.from_dict({"save_folder": "/tmp", "live_unknown": 1})
         assert config == VoiceNoteConfig(save_folder="/tmp")
@@ -255,24 +269,78 @@ def _fake_prompts(monkeypatch, answers: list[str]) -> list[str]:
     return asked
 
 
+class TestDefaultLiveModelFor:
+    def test_mlx_defaults_to_large_v3_turbo(self):
+        assert default_live_model_for("mlx") == "large-v3-turbo"
+        assert DEFAULT_LIVE_MLX_WHISPER_MODEL == "large-v3-turbo"
+
+    def test_faster_whisper_defaults_to_small(self):
+        assert default_live_model_for("faster-whisper") == DEFAULT_LIVE_WHISPER_MODEL == "small"
+
+    def test_unknown_engine_uses_global_default(self):
+        assert default_live_model_for("bogus") == DEFAULT_LIVE_WHISPER_MODEL
+
+    def test_global_defaults_are_unchanged(self):
+        """エンジン別の既定は対話設定のみ。VoiceNoteConfig の既定は faster-whisper + small。"""
+        config = VoiceNoteConfig()
+        assert (config.live_engine, config.live_whisper_model) == ("faster-whisper", "small")
+
+
 class TestConfigureLiveInteractive:
     def test_skip_returns_empty_overrides(self, monkeypatch):
         _fake_prompts(monkeypatch, ["n"])
         assert configure_live_interactive() == {}
 
     def test_collects_live_settings(self, monkeypatch):
-        _fake_prompts(monkeypatch, ["y", "1", "ja", "qwen3:8b", "http://localhost:11434/v1"])
+        _fake_prompts(
+            monkeypatch, ["y", "1", "large-v3-turbo", "ja", "qwen3:8b", "http://localhost:11434/v1"]
+        )
         overrides = configure_live_interactive()
         assert overrides == {
             "live_engine": "mlx",
+            "live_whisper_model": "large-v3-turbo",
             "live_language": "ja",
             "live_llm_model": "qwen3:8b",
             "live_llm_base_url": "http://localhost:11434/v1",
         }
 
+    @pytest.mark.parametrize(
+        "choice,expected_default", [("1", "large-v3-turbo"), ("2", "small")], ids=["mlx", "fw"]
+    )
+    def test_model_prompt_default_depends_on_engine(self, monkeypatch, choice, expected_default):
+        defaults: list[str | None] = []
+
+        answers = iter(["y", choice, None, "", DEFAULT_LIVE_LLM_MODEL, DEFAULT_LIVE_LLM_BASE_URL])
+
+        def fake_ask(question, *args, **kwargs):
+            answer = next(answers)
+            if answer is None:  # モデル入力: 既定値をそのまま受け入れる
+                defaults.append(kwargs.get("default"))
+                return kwargs["default"]
+            return answer
+
+        monkeypatch.setattr(config_module.Prompt, "ask", staticmethod(fake_ask))
+        overrides = configure_live_interactive()
+        assert defaults == [expected_default]
+        assert overrides["live_whisper_model"] == expected_default
+
+    def test_blank_model_falls_back_to_engine_default(self, monkeypatch):
+        _fake_prompts(
+            monkeypatch, ["y", "1", "  ", "", DEFAULT_LIVE_LLM_MODEL, DEFAULT_LIVE_LLM_BASE_URL]
+        )
+        assert configure_live_interactive()["live_whisper_model"] == "large-v3-turbo"
+
+    def test_custom_model_is_kept(self, monkeypatch):
+        _fake_prompts(
+            monkeypatch,
+            ["y", "2", " medium ", "", DEFAULT_LIVE_LLM_MODEL, DEFAULT_LIVE_LLM_BASE_URL],
+        )
+        assert configure_live_interactive()["live_whisper_model"] == "medium"
+
     def test_faster_whisper_choice_and_auto_language(self, monkeypatch):
         _fake_prompts(
-            monkeypatch, ["y", "2", "auto", DEFAULT_LIVE_LLM_MODEL, DEFAULT_LIVE_LLM_BASE_URL]
+            monkeypatch,
+            ["y", "2", "small", "auto", DEFAULT_LIVE_LLM_MODEL, DEFAULT_LIVE_LLM_BASE_URL],
         )
         overrides = configure_live_interactive()
         assert overrides["live_engine"] == "faster-whisper"
@@ -280,16 +348,25 @@ class TestConfigureLiveInteractive:
 
     def test_invalid_engine_choice_is_reasked(self, monkeypatch):
         asked = _fake_prompts(
-            monkeypatch, ["y", "9", "2", "", DEFAULT_LIVE_LLM_MODEL, DEFAULT_LIVE_LLM_BASE_URL]
+            monkeypatch,
+            ["y", "9", "2", "small", "", DEFAULT_LIVE_LLM_MODEL, DEFAULT_LIVE_LLM_BASE_URL],
         )
         overrides = configure_live_interactive()
         assert overrides["live_engine"] == "faster-whisper"
-        assert len(asked) == 6
+        assert len(asked) == 7
 
     def test_non_loopback_base_url_is_reasked(self, monkeypatch):
         _fake_prompts(
             monkeypatch,
-            ["y", "2", "", "qwen2.5:7b", "http://example.com/v1", "http://127.0.0.1:11434/v1"],
+            [
+                "y",
+                "2",
+                "small",
+                "",
+                "qwen2.5:7b",
+                "http://example.com/v1",
+                "http://127.0.0.1:11434/v1",
+            ],
         )
         overrides = configure_live_interactive()
         assert overrides["live_llm_base_url"] == "http://127.0.0.1:11434/v1"

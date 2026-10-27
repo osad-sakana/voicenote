@@ -13,6 +13,7 @@ import threading
 import time
 from collections.abc import Callable
 
+from live.language_guard import is_plausible_japanese
 from live.local_llm import ChatBackend
 
 _logger = logging.getLogger("voicenote")
@@ -42,7 +43,10 @@ _SYSTEM_PROMPT = """\
 規則:
 - 入力に無い内容を追加しない（推測・補完・創作をしない）
 - 前回の要約の要点は、新しい文字起こしと矛盾しない限り残す
-- 日本語で簡潔に書く
+- 必ず日本語で出力する。中国語・英語で書かない（固有名詞・専門用語は原文の表記のままでよい）
+- 見出しは『現在の話題:』『進捗:』をこの表記のまま使う
+- 新しい文字起こしが短すぎる・意味を成さない場合は、前回の要約をそのまま返す
+- 簡潔に書く
 """
 
 
@@ -79,13 +83,16 @@ def accept_summary(
 ) -> str:
     """LLM の出力を要約として採用するか判定し、採用する要約を返す。
 
-    空・min_chars 未満・前回より極端に短い（len(new) < len(prev) * min_ratio）場合は
+    空・min_chars 未満・前回より極端に短い（len(new) < len(prev) * min_ratio）・
+    日本語として不正（中国語の混入など。live.language_guard で判定）な場合は
     出力が壊れているとみなして前回の要約を返す。
     """
     cleaned = strip_think(new or "")
     if len(cleaned) < max(min_chars, 1):
         return prev
     if prev and len(cleaned) < len(prev) * min_ratio - _RATIO_EPSILON:
+        return prev
+    if not is_plausible_japanese(cleaned):
         return prev
     return cleaned
 
@@ -230,7 +237,8 @@ class RollingSummarizer:
         # prev が空の初回は「不採用で prev を返した」と「cleaned が空」が区別できないため、
         # 空出力は明示的に不採用として扱う
         if not cleaned or accepted != cleaned:
-            self._warn("要約結果が不正なため、前回の要約を維持します")
+            # 要約本文（文字起こし由来）はログ・警告に出さない
+            self._warn(_rejection_message(cleaned))
             return False
         last_seq = snapshot[-1][0]
         with self._lock:
@@ -245,6 +253,13 @@ class RollingSummarizer:
             self._on_warning(message)
         except Exception:
             _logger.exception("要約の警告コールバックでエラーが発生しました")
+
+
+def _rejection_message(cleaned: str) -> str:
+    """不採用理由に応じた警告メッセージを返す（本文は含めない）。"""
+    if cleaned and not is_plausible_japanese(cleaned):
+        return "要約結果が日本語として不正なため（中国語の混入など）、前回の要約を維持します"
+    return "要約結果が不正なため、前回の要約を維持します"
 
 
 def _join(pending: tuple[tuple[int, str], ...]) -> str:
