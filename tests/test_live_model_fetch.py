@@ -73,13 +73,87 @@ class TestResolveRepo:
             resolve_repo("whisper.cpp", "small")
 
 
+_FW_REQUIRED = ("model.bin", "config.json", "tokenizer.json")
+
+
+def _make_cache(cache_root, repo_id: str, files: tuple[str, ...], *, snapshot=True):
+    """tmp_path に HF Hub キャッシュの構造(refs/main とスナップショット)を作る"""
+    repo_dir = cache_root / f"models--{repo_id.replace('/', '--')}"
+    (repo_dir / "refs").mkdir(parents=True)
+    (repo_dir / "refs" / "main").write_text("abc123")
+    snap = repo_dir / "snapshots" / "abc123"
+    if snapshot:
+        snap.mkdir(parents=True)
+        for name in files:
+            (snap / name).write_text("x")
+    return snap
+
+
+@pytest.fixture
+def hf_cache(tmp_path, monkeypatch):
+    """snapshot_download が呼び出し時に読むキャッシュの場所を tmp_path に向ける"""
+    from huggingface_hub import constants
+
+    cache = tmp_path / "hub"
+    cache.mkdir()
+    monkeypatch.setattr(constants, "HF_HUB_CACHE", str(cache))
+    monkeypatch.setattr(constants, "HF_HUB_OFFLINE", True)  # 万一でも通信しない
+    return cache
+
+
+class TestIsCachedRequiredFiles:
+    """部分ダウンロード(ref と snapshot はあるがファイルが欠けている)を取得済みとみなさない"""
+
+    def test_missing_model_bin_is_not_cached(self, hf_cache):
+        _make_cache(hf_cache, "Systran/faster-whisper-small", ("config.json",))
+        assert is_cached(resolve_repo(ENGINE_FASTER_WHISPER, "small")) is False
+
+    @pytest.mark.parametrize("missing", _FW_REQUIRED)
+    def test_each_faster_whisper_file_is_required(self, hf_cache, missing):
+        files = tuple(f for f in _FW_REQUIRED if f != missing)
+        _make_cache(hf_cache, "Systran/faster-whisper-small", files)
+        assert is_cached(resolve_repo(ENGINE_FASTER_WHISPER, "small")) is False
+
+    def test_complete_faster_whisper_snapshot_is_cached(self, hf_cache):
+        _make_cache(hf_cache, "Systran/faster-whisper-small", _FW_REQUIRED)
+        assert is_cached(resolve_repo(ENGINE_FASTER_WHISPER, "small")) is True
+
+    def test_dangling_symlink_counts_as_missing(self, hf_cache):
+        snap = _make_cache(hf_cache, "Systran/faster-whisper-small", ("config.json",))
+        (snap / "tokenizer.json").write_text("x")
+        (snap / "model.bin").symlink_to(snap / "no-such-blob")
+        assert is_cached(resolve_repo(ENGINE_FASTER_WHISPER, "small")) is False
+
+    @pytest.mark.parametrize("weights", ["weights.npz", "weights.safetensors", "model.safetensors"])
+    def test_mlx_weights_npz_or_safetensors(self, hf_cache, weights):
+        repo = resolve_repo(ENGINE_MLX, "small")
+        _make_cache(hf_cache, repo.repo_id, ("config.json", weights))
+        assert is_cached(repo) is True
+
+    def test_mlx_without_weights_is_not_cached(self, hf_cache):
+        repo = resolve_repo(ENGINE_MLX, "small")
+        _make_cache(hf_cache, repo.repo_id, ("config.json",))
+        assert is_cached(repo) is False
+
+    def test_mlx_without_config_is_not_cached(self, hf_cache):
+        repo = resolve_repo(ENGINE_MLX, "small")
+        _make_cache(hf_cache, repo.repo_id, ("weights.npz",))
+        assert is_cached(repo) is False
+
+    def test_no_snapshot_is_not_cached(self, hf_cache):
+        _make_cache(hf_cache, "Systran/faster-whisper-small", (), snapshot=False)
+        assert is_cached(resolve_repo(ENGINE_FASTER_WHISPER, "small")) is False
+
+
 class TestIsCached:
-    def test_true_when_local_lookup_succeeds(self, monkeypatch):
+    def test_true_when_local_lookup_succeeds(self, monkeypatch, tmp_path):
         received = {}
+        for name in _FW_REQUIRED:
+            (tmp_path / name).write_text("x")
 
         def fake(repo_id, **kwargs):
             received.update(repo_id=repo_id, **kwargs)
-            return "/cache/snap"
+            return str(tmp_path)
 
         monkeypatch.setattr(huggingface_hub, "snapshot_download", fake)
         spec = RepoSpec("Systran/faster-whisper-small", FASTER_WHISPER_ALLOW_PATTERNS)

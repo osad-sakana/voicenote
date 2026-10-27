@@ -51,6 +51,7 @@ from .live_workflow_support import (
     BANNER_MODEL_DOWNLOAD,
     BANNER_OLLAMA,
     BANNER_VAD_FALLBACK,
+    ENGINE_LOCK_TIMEOUT_SEC,
     PROGRESS_INTERVAL_SEC,
     LiveDeps,
     LiveWorkflowCallbacks,
@@ -111,11 +112,13 @@ class LiveWorkflow:
         clock: Callable[[], float] = time.monotonic,
         stop_timeout: float = STREAM_STOP_TIMEOUT_SEC,
         session_stop_timeout: float = SESSION_STOP_TIMEOUT_SEC,
+        engine_lock_timeout: float = ENGINE_LOCK_TIMEOUT_SEC,
     ):
         """config は開始時点の値をその実行の間使い続ける。can_start はマイク排他の判定
         (App の busy・通常録音の状態)で False なら開始を拒否する。thread_factory は
         start / join / is_alive を持つ threading.Thread 互換。clock は警告・進捗の間引きと
-        放棄ストリームの経過時間に使う。"""
+        放棄ストリームの経過時間に使う。engine_lock_timeout は load() が前回の実行の
+        transcribe 完了を待つ上限(超えたら load 失敗として警告し、録音は継続する)。"""
         self._config = config
         self._callbacks = callbacks
         self._deps = deps or LiveDeps()
@@ -124,6 +127,7 @@ class LiveWorkflow:
         self._clock = clock
         self._stop_timeout = stop_timeout
         self._session_stop_timeout = session_stop_timeout
+        self._engine_lock_timeout = engine_lock_timeout
         self._lock = threading.RLock()
         self._engine_lock = threading.Lock()  # 実行をまたいで asr を直列化する
         self._state = LiveViewState()
@@ -338,15 +342,33 @@ class LiveWorkflow:
             return "他の録音・文字起こしが実行中です。終了してから開始してください"
         return self._pending_close_rejection()
 
+    def has_pending_close(self) -> bool:
+        """タイムアウトで放棄したストリームが猶予内でまだ解放中なら True(状態は変えない)
+
+        通常録音側の開始判定から参照する(ライブ自身の開始判定は _pending_close_rejection)。
+        """
+        with self._lock:
+            recorder = self._pending_close_recorder
+            if recorder is None:
+                return False
+            return recorder.is_closing() and not self._close_grace_expired()
+
+    def _close_grace_expired(self) -> bool:
+        """放棄ストリームの猶予を過ぎたか(IDLE に戻る前は経過0秒とみなす。ロック保持中に呼ぶ)"""
+        return self._pending_close_elapsed() >= self._stop_timeout * STREAM_CLOSE_GRACE_FACTOR
+
+    def _pending_close_elapsed(self) -> float:
+        since = self._pending_close_since
+        return 0.0 if since is None else self._clock() - since
+
     def _pending_close_rejection(self) -> str | None:
         """タイムアウトで放棄したストリームがまだ解放中なら拒否する(猶予を過ぎたら諦めて許可)"""
         recorder = self._pending_close_recorder
         if recorder is None:
             return None
-        since = self._pending_close_since
-        elapsed = 0.0 if since is None else self._clock() - since
+        elapsed = self._pending_close_elapsed()
         closing = recorder.is_closing()
-        if closing and elapsed < self._stop_timeout * STREAM_CLOSE_GRACE_FACTOR:
+        if closing and not self._close_grace_expired():
             return "前回のストリームがまだ解放されていません。しばらく待ってから再試行してください"
         if closing:
             _logger.warning("放棄したストリームが %.1f 秒経っても解放されません", elapsed)
@@ -426,7 +448,9 @@ class LiveWorkflow:
         self._check_cancel(run)
         session = self._deps.session_factory(
             settings,
-            engine=_SerializedEngine(engine, self._engine_lock),
+            engine=_SerializedEngine(
+                engine, self._engine_lock, load_timeout=self._engine_lock_timeout
+            ),
             vad=detector,
             backend=backend,
             callbacks=self._session_callbacks(run),
@@ -457,9 +481,16 @@ class LiveWorkflow:
             self._update(set_phase, LivePhase.RECORDING)
 
     def _fail_prepare(self, run: _Run, message: str | None) -> None:
-        """準備の失敗・取り消し。起動済みセッションを解放して IDLE に戻す"""
+        """準備の失敗・取り消し。起動済みセッションを解放して IDLE に戻す
+
+        session.stop() がタイムアウトしてもセッションのスレッドは動き続けるため、世代を進めて
+        遅れて届く on_status / on_warning などを捨てる(_take_over_drain と同じ方式)。
+        """
         with self._lock:
-            session = self._session if self._run is run else None
+            current = self._run is run
+            session = self._session if current else None
+            if current:
+                self._gen += 1
         if session is not None:
             with contextlib.suppress(Exception):
                 session.stop(timeout=ERROR_STOP_TIMEOUT_SEC)

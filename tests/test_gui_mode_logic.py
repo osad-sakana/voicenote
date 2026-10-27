@@ -90,3 +90,12 @@ class TestOtherModeRejection:
         title, message = rejection
         assert "ライブ" in title or "ライブ" in message
         assert message
+
+    def test_rejected_while_live_stream_closing(self):
+        rejection = other_mode_rejection(live_active=False, live_stream_closing=True)
+        assert rejection is not None
+        assert "解放" in rejection[1]
+
+    def test_live_active_takes_priority_over_stream_closing(self):
+        rejection = other_mode_rejection(live_active=True, live_stream_closing=True)
+        assert rejection == other_mode_rejection(live_active=True)

@@ -335,6 +335,7 @@ class Harness:
         can_start=lambda: True,
         thread_factory=ImmediateThread,
         note_saver=None,
+        engine_lock_timeout: float | None = None,
     ):
         self.tmp_path = tmp_path
         self.log: list[str] = []
@@ -375,6 +376,7 @@ class Harness:
             can_start=can_start,
             thread_factory=thread_factory,
             clock=lambda: self.clock_now,
+            **({} if engine_lock_timeout is None else {"engine_lock_timeout": engine_lock_timeout}),
         )
 
     def _make_recorder(self, device_id, dest, chunk_sink):

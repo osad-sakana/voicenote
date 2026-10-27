@@ -55,11 +55,22 @@ def normal_exec_spec(mode: str, *, recording: bool) -> tuple[str, bool]:
     raise ValueError(f"ライブ以外のモードが必要です: {mode!r}")
 
 
-def other_mode_rejection(*, live_active: bool) -> tuple[str, str] | None:
-    """ライブ処理中(後処理を含む)なら、通常録音・文字起こしの開始を拒否する理由を返す"""
-    if not live_active:
-        return None
-    return (
-        "ライブ実行中",
-        "ライブ文字起こし(または前回の後処理)が実行中です。終了してから開始してください",
-    )
+def other_mode_rejection(
+    *, live_active: bool, live_stream_closing: bool = False
+) -> tuple[str, str] | None:
+    """ライブ処理中(後処理を含む)なら、通常録音・文字起こしの開始を拒否する理由を返す
+
+    live_stream_closing: ライブで停止がタイムアウトし放棄したストリームが、まだ解放中か
+    """
+    if live_active:
+        return (
+            "ライブ実行中",
+            "ライブ文字起こし(または前回の後処理)が実行中です。終了してから開始してください",
+        )
+    if live_stream_closing:
+        return (
+            "ストリーム解放中",
+            "前回のライブ録音のストリームがまだ解放されていません。"
+            "しばらく待ってから再試行してください",
+        )
+    return None

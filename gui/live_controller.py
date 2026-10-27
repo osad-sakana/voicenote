@@ -79,12 +79,20 @@ class LiveController:
     def is_active(self) -> bool:
         return self._workflow.is_active
 
+    def has_pending_close(self) -> bool:
+        """ライブで放棄したストリームが猶予内でまだ解放中か(通常録音の開始判定で使う)"""
+        return self._workflow.has_pending_close()
+
     def update_config(self, config: VoiceNoteConfig) -> None:
         self._workflow.update_config(config)
 
     def _can_start(self) -> bool:
-        """マイク排他: App が処理中でなく、通常録音もしていなければ開始できる"""
-        return not self._app._busy and not self._app._workflow.is_recording
+        """マイク排他: App が処理中でなく、通常録音もしておらず、
+        通常録音で放棄したストリームも解放済みなら開始できる"""
+        workflow = self._app._workflow
+        return (
+            not self._app._busy and not workflow.is_recording and not workflow.has_pending_close()
+        )
 
     def show(self) -> None:
         self._panel.show(after=self._app._log_container)
@@ -129,7 +137,12 @@ class LiveController:
         app = self._app
         device_label = app._device_var.get()
         busy = app._busy or app._workflow.is_recording
-        error = validate_live_start(app._config, device_label, mic_busy=busy)
+        error = validate_live_start(
+            app._config,
+            device_label,
+            mic_busy=busy,
+            stream_closing=app._workflow.has_pending_close(),
+        )
         if error:
             messagebox.showwarning(*error)
             return

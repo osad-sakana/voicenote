@@ -67,6 +67,18 @@ class TestValidateLiveStart:
         assert error is not None
         assert "実行中" in error[1]
 
+    def test_rejects_while_normal_stream_closing(self, tmp_path):
+        config = VoiceNoteConfig(save_folder=str(tmp_path))
+        error = validate_live_start(config, "[1] マイク", mic_busy=False, stream_closing=True)
+        assert error is not None
+        assert error[0] == "ストリーム解放中"
+        assert "解放" in error[1]
+
+    def test_mic_busy_takes_priority_over_stream_closing(self, tmp_path):
+        config = VoiceNoteConfig(save_folder=str(tmp_path))
+        error = validate_live_start(config, "[1] マイク", mic_busy=True, stream_closing=True)
+        assert error is not None and error[0] == "実行中"
+
     def test_rejects_invalid_live_settings(self, tmp_path):
         config = VoiceNoteConfig(save_folder=str(tmp_path), live_engine="bogus")
         error = validate_live_start(config, "[1] マイク", mic_busy=False)

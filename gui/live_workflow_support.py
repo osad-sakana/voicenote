@@ -28,6 +28,7 @@ from .devices import parse_device_id
 from .live_state import LiveViewState
 
 PROGRESS_INTERVAL_SEC = 0.25  # ダウンロード進捗バナーの更新間隔
+ENGINE_LOCK_TIMEOUT_SEC = 30.0  # load() が前回の実行の transcribe 完了を待つ上限
 
 BANNER_MODEL_DOWNLOAD = "model_download"
 BANNER_ENGINE_FALLBACK = "engine_fallback"
@@ -38,7 +39,7 @@ BANNER_LOW_INPUT = "low_input"
 
 
 def validate_live_start(
-    config: VoiceNoteConfig, device_label: str, *, mic_busy: bool
+    config: VoiceNoteConfig, device_label: str, *, mic_busy: bool, stream_closing: bool = False
 ) -> tuple[str, str] | None:
     """ライブ開始前の検証。問題なければ None、あれば (title, message)
 
@@ -46,9 +47,15 @@ def validate_live_start(
         config: 現在の設定
         device_label: デバイス選択欄のラベル('[3] マイク' 形式。無ければ 'デバイスなし')
         mic_busy: 通常の録音・文字起こしなど、マイクや処理を使う操作が実行中か
+        stream_closing: 通常録音で停止がタイムアウトし放棄したストリームが、まだ解放中か
     """
     if mic_busy:
         return ("実行中", "他の録音・文字起こしが実行中です。終了してから開始してください")
+    if stream_closing:
+        return (
+            "ストリーム解放中",
+            "前回の録音のストリームがまだ解放されていません。しばらく待ってから再試行してください",
+        )
     if not config.save_folder:
         return (
             "設定が必要",
@@ -181,20 +188,36 @@ class Cancelled(Exception):
     """PREPARING 中に取り消された"""
 
 
+class EngineBusyError(RuntimeError):
+    """前回の実行の asr スレッドがエンジンを使い続けていて load() できない"""
+
+
 class SerializedEngine:
     """load / transcribe を workflow 共有のロック下で実行するラッパー
 
     session.stop() がタイムアウトしても asr スレッドは処理中の区間を終えるまで動き続ける。
     次の実行の asr スレッドと同時に mlx(Metal)を使わないよう、実行をまたいで直列化する。
+    放棄した asr スレッドが transcribe で固まった場合に load() が無通知で待ち続けないよう、
+    load() のロック取得は load_timeout 秒で諦めて EngineBusyError を送出する
+    (LiveSession が on_warning で知らせ、録音は継続する)。
     """
 
-    def __init__(self, inner, lock: threading.Lock):
+    def __init__(
+        self, inner, lock: threading.Lock, *, load_timeout: float = ENGINE_LOCK_TIMEOUT_SEC
+    ):
         self._inner = inner
         self._lock = lock
+        self._load_timeout = load_timeout
 
     def load(self) -> None:
-        with self._lock:
+        if not self._lock.acquire(timeout=self._load_timeout):
+            raise EngineBusyError(
+                "前回の処理が終わっていません。しばらくしてからもう一度お試しください"
+            )
+        try:
             self._inner.load()
+        finally:
+            self._lock.release()
 
     def transcribe(self, samples, language):
         with self._lock:

@@ -54,6 +54,37 @@ class TestExclusion:
         assert h.start() is not None
 
 
+class TestFailedPrepareDiscardsLateCallbacks:
+    """準備の失敗・取り消し後に、解放しきれなかったセッションから遅れて届く通知を捨てる"""
+
+    def _failed(self, tmp_path) -> Harness:
+        h = Harness(tmp_path, fail_start=True)  # セッション起動後に録音開始で失敗
+        h.start()
+        assert h.spy.errors
+        assert h.state.phase is LivePhase.IDLE
+        assert len(h.sessions) == 1
+        return h
+
+    def test_late_status_and_warning_are_ignored(self, tmp_path):
+        h = self._failed(tmp_path)
+        before, notified = h.state, len(h.spy.states)
+        callbacks = h.sessions[0].callbacks
+        callbacks.on_status("遅れた状態")
+        callbacks.on_warning("遅れた警告")
+        callbacks.on_segment(0, 0.0, 1.0, "遅れた区間")
+        assert h.state is before
+        assert len(h.spy.states) == notified
+
+    def test_late_callbacks_do_not_touch_next_run(self, tmp_path):
+        h = self._failed(tmp_path)
+        h.fail_start = False
+        assert h.start() is None
+        before = h.state
+        h.sessions[0].callbacks.on_warning("前回の実行の警告")
+        assert h.state is before
+        assert "前回の実行の警告" not in h.state.warnings
+
+
 # ──────────────── 表示・メーター ────────────────
 
 

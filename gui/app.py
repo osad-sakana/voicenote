@@ -192,8 +192,12 @@ class App(TkinterDnD.DnDWrapper, ctk.CTk):
             self._run_transcribe_only()
 
     def _reject_if_live_active(self) -> bool:
-        """ライブ処理中なら理由を表示して True (通常録音・文字起こしの開始前に呼ぶ)"""
-        rejection = other_mode_rejection(live_active=self._live.is_active)
+        """ライブ処理中、またはライブで放棄したストリームが解放中なら理由を表示して True
+        (通常録音・文字起こしの開始前に呼ぶ)"""
+        rejection = other_mode_rejection(
+            live_active=self._live.is_active,
+            live_stream_closing=self._live.has_pending_close(),
+        )
         if rejection:
             messagebox.showwarning(*rejection)
         return rejection is not None

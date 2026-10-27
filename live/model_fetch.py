@@ -35,6 +35,13 @@ FASTER_WHISPER_ALLOW_PATTERNS: tuple[str, ...] = (
     "tokenizer.json",
     "vocabulary.*",
 )
+# is_cached で存在を確かめるファイル(preprocessor_config.json / vocabulary.* は無いリポジトリがある)
+FASTER_WHISPER_REQUIRED_FILES: tuple[str, ...] = ("model.bin", "config.json", "tokenizer.json")
+# mlx は重み(weights.npz または *.safetensors)と config.json が必要
+MLX_REQUIRED_FILE_GROUPS: tuple[tuple[str, ...], ...] = (
+    ("config.json",),
+    ("weights.npz", "*.safetensors"),
+)
 
 # faster_whisper.utils._MODELS(private)の import に失敗した場合の控え(1.2.1 と同内容)
 _FALLBACK_FASTER_WHISPER_MODELS: dict[str, str] = {
@@ -132,15 +139,38 @@ def _download_kwargs(repo: RepoSpec) -> dict:
     return {"allow_patterns": list(repo.allow_patterns)}
 
 
+def _required_file_groups(repo: RepoSpec) -> tuple[tuple[str, ...], ...]:
+    """スナップショットに揃っているべきファイル。各グループのどれか1つ(glob)があればよい
+
+    allow_patterns があれば faster-whisper(CTranslate2)、無ければ mlx のリポジトリとみなす。
+    """
+    if repo.allow_patterns is not None:
+        return tuple((name,) for name in FASTER_WHISPER_REQUIRED_FILES)
+    return MLX_REQUIRED_FILE_GROUPS
+
+
+def _has_files(snapshot: Path, groups: tuple[tuple[str, ...], ...]) -> bool:
+    """各グループのパターンに一致する実ファイルがあるか(壊れたシンボリックリンクは欠損扱い)"""
+    return all(
+        any(path.is_file() for pattern in group for path in snapshot.glob(pattern))
+        for group in groups
+    )
+
+
 def is_cached(repo: RepoSpec) -> bool:
-    """ローカルキャッシュだけで snapshot が解決できれば True(通信しない)"""
+    """ローカルキャッシュだけで必要ファイルが揃った snapshot を解決できれば True(通信しない)
+
+    snapshot_download(local_files_only=True) は refs とスナップショットのフォルダがあれば
+    ファイルが欠けていても成功するため、中断した部分ダウンロードを取得済みと誤判定しないよう
+    必要ファイルの存在も確認する(欠けていれば False を返し、fetch で再開させる)。
+    """
     from huggingface_hub import snapshot_download
 
     try:
-        snapshot_download(repo.repo_id, local_files_only=True, **_download_kwargs(repo))
+        snapshot = snapshot_download(repo.repo_id, local_files_only=True, **_download_kwargs(repo))
     except Exception:
         return False
-    return True
+    return _has_files(Path(snapshot), _required_file_groups(repo))
 
 
 def _safe_notify(on_progress: ProgressCallback | None, done: int, total: int) -> None:
