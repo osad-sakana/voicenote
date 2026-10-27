@@ -86,6 +86,18 @@ class SileroVAD:
         return float(np.clip(out[-2], 0.0, 1.0))
 
 
+def vad_kind(vad: VoiceActivityDetector) -> str | None:
+    """検出器の実際の種類("energy" / "silero")を返す。それ以外は None
+
+    create_vad("silero") がフォールバックしたかを呼び出し側で判定するために使う
+    """
+    if isinstance(vad, EnergyVAD):
+        return "energy"
+    if isinstance(vad, SileroVAD):
+        return "silero"
+    return None
+
+
 def create_vad(name: str) -> VoiceActivityDetector:
     """名前から VAD を生成する。silero の初期化に失敗したら EnergyVAD にフォールバック"""
     if name == "energy":

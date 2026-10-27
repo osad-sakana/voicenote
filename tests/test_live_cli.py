@@ -282,6 +282,66 @@ class TestEngineFallback:
         assert exc.value.code == 1
 
 
+VAD_FALLBACK_MESSAGE = "Silero VADを読み込めなかったため energy VAD にフォールバックしました"
+
+
+class TestVadFallback:
+    """Silero の読み込みに失敗して energy に落ちたことを画面に出す"""
+
+    @pytest.fixture
+    def real_vad(self, monkeypatch):
+        """env が差し替えた create_vad を本物に戻す"""
+        import live.vad as vad_module
+
+        monkeypatch.setattr(live_cli, "create_vad", vad_module.create_vad)
+        return vad_module
+
+    def test_silero_load_failure_warns_and_uses_energy(self, env, real_vad, monkeypatch):
+        def broken(*args, **kwargs):
+            raise RuntimeError("onnxruntime missing")
+
+        monkeypatch.setattr(real_vad, "SileroVAD", broken)
+        live_cli.run_live(env.config, None, env.dest)
+        out = env.out.getvalue()
+        assert VAD_FALLBACK_MESSAGE in out
+        assert "入力が小さいと取りこぼしが増えます" in out
+        assert isinstance(env.session_cls.call_args.kwargs["vad"], real_vad.EnergyVAD)
+        assert "save_live_note" in env.events
+
+    def test_warning_is_shown_before_recording(self, env, real_vad, monkeypatch):
+        def broken(*args, **kwargs):
+            raise RuntimeError("onnxruntime missing")
+
+        monkeypatch.setattr(real_vad, "SileroVAD", broken)
+        live_cli.run_live(env.config, None, env.dest)
+        out = env.out.getvalue()
+        assert out.index(VAD_FALLBACK_MESSAGE) < out.index("ライブ文字起こしを開始します")
+
+    def test_silero_success_has_no_warning(self, env, real_vad, monkeypatch):
+        class FakeSilero(real_vad.SileroVAD):
+            def __init__(self):
+                pass
+
+        monkeypatch.setattr(real_vad, "SileroVAD", FakeSilero)
+        live_cli.run_live(env.config, None, env.dest)
+        assert VAD_FALLBACK_MESSAGE not in env.out.getvalue()
+        assert isinstance(env.session_cls.call_args.kwargs["vad"], FakeSilero)
+
+    def test_explicit_energy_has_no_warning(self, env, real_vad):
+        config = VoiceNoteConfig(save_folder=env.config.save_folder, live_vad="energy")
+        live_cli.run_live(config, None, env.dest)
+        assert VAD_FALLBACK_MESSAGE not in env.out.getvalue()
+        assert isinstance(env.session_cls.call_args.kwargs["vad"], real_vad.EnergyVAD)
+
+    def test_default_config_requests_silero(self, env, monkeypatch):
+        requested: list[str] = []
+        monkeypatch.setattr(
+            live_cli, "create_vad", lambda name: requested.append(name) or MagicMock()
+        )
+        live_cli.run_live(env.config, None, env.dest)
+        assert requested == ["silero"]
+
+
 class TestLLMProbe:
     @pytest.mark.parametrize("status", ["server_down", "model_missing"])
     def test_unavailable_llm_continues_without_summary(self, env, status):

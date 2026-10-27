@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 import live.vad as vad_module
-from live.vad import EnergyVAD, create_vad
+from live.vad import EnergyVAD, create_vad, vad_kind
 
 SAMPLE_RATE = 16000
 FRAME = 512
@@ -74,6 +74,32 @@ class TestCreateVad:
         monkeypatch.setattr(vad_module, "SileroVAD", broken)
 
         assert isinstance(create_vad("silero"), EnergyVAD)
+
+
+class TestVadKind:
+    def test_energy(self):
+        assert vad_kind(EnergyVAD()) == "energy"
+
+    def test_silero(self):
+        class FakeModel:
+            def __call__(self, audio):
+                return np.zeros(len(audio) // 512)
+
+        assert vad_kind(vad_module.SileroVAD(model=FakeModel())) == "silero"
+
+    def test_unknown_detector_is_none(self):
+        class Custom:
+            def speech_prob(self, frame):
+                return 0.0
+
+        assert vad_kind(Custom()) is None
+
+    def test_fallback_is_reported_as_energy(self, monkeypatch):
+        def broken(*args, **kwargs):
+            raise RuntimeError("onnxruntime missing")
+
+        monkeypatch.setattr(vad_module, "SileroVAD", broken)
+        assert vad_kind(create_vad("silero")) == "energy"
 
 
 class TestSileroVAD:

@@ -23,7 +23,7 @@ from config import DEFAULT_LIVE_WHISPER_MODEL, VoiceNoteConfig
 from live.local_llm import LocalLLMClient, probe
 from live.note import external_send_warning, render_live_note
 from live.session import LiveCallbacks, LiveSession, LiveSettings
-from live.vad import create_vad
+from live.vad import create_vad, vad_kind
 from live.view import LiveView
 from note_writer import save_live_note
 from recorder import record_audio
@@ -35,6 +35,10 @@ SESSION_STOP_TIMEOUT_SEC = 120.0
 ERROR_STOP_TIMEOUT_SEC = 2.0
 PROBE_TIMEOUT_SEC = 3.0
 MLX_INSTALL_HINT = "uv sync --extra live-mlx"
+VAD_FALLBACK_WARNING = (
+    "Silero VADを読み込めなかったため energy VAD にフォールバックしました"
+    "（入力が小さいと取りこぼしが増えます）"
+)
 # mlx 向けには実用的だが、faster-whisper(CPU, int8) では実時間に追いつかないモデル
 # (M1 実測2回: large-v3-turbo は区間遅延 p50 5.4〜9.7秒 / RTF 3.0〜4.1。small は p50 2.0〜2.9秒)
 CPU_UNSUITABLE_MODELS = frozenset({"large-v3-turbo", "turbo"})
@@ -141,6 +145,14 @@ def _create_fallback(create_engine, unavailable_error, settings: LiveSettings):
         raise  # _fatal は終了するため到達しない(型チェッカー向け)
 
 
+def _create_vad(settings: LiveSettings):
+    """設定の VAD を生成する。Silero が使えず energy に落ちた場合は画面に警告する"""
+    vad = create_vad(settings.vad)
+    if settings.vad != "energy" and vad_kind(vad) == "energy":
+        _warn(VAD_FALLBACK_WARNING)
+    return vad
+
+
 def _prepare_backend(settings: LiveSettings):
     """ローカルLLMの疎通を確認し、使えるならバックエンドを返す。使えなければ None"""
     if not settings.llm_enabled:
@@ -215,7 +227,7 @@ def run_live(config: VoiceNoteConfig, device: str | None, dest_dir: Path) -> Non
     session = LiveSession(
         settings,
         engine=engine,
-        vad=create_vad(settings.vad),
+        vad=_create_vad(settings),
         backend=backend,
         callbacks=_make_callbacks(view),
     )

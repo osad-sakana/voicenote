@@ -25,7 +25,10 @@ DEFAULT_LIVE_WHISPER_MODEL = "small"
 # 区間遅延 p50 約1.5秒で実用範囲）。VoiceNoteConfig / 旧 config.json の既定は small のまま
 DEFAULT_LIVE_MLX_WHISPER_MODEL = "large-v3-turbo"
 _LIVE_ENGINE_DEFAULT_MODELS = {"mlx": DEFAULT_LIVE_MLX_WHISPER_MODEL}
-DEFAULT_LIVE_VAD = "energy"
+# 入力が小さい環境(RMS -47dB 程度)でもエネルギーVADより取りこぼしが大幅に少ないため Silero を既定にする
+DEFAULT_LIVE_VAD = "silero"
+# session_models が config を import するため、循環を避けて選択肢はここで定義する
+LIVE_VAD_CHOICES = ("silero", "energy")
 DEFAULT_LIVE_LLM_BASE_URL = "http://127.0.0.1:11434/v1"
 DEFAULT_LIVE_LLM_MODEL = "qwen2.5:7b"
 DEFAULT_LIVE_SUMMARY_INTERVAL_SEC = 45
@@ -265,6 +268,7 @@ def configure_live_interactive() -> dict:
     return {
         "live_engine": engine,
         "live_whisper_model": _ask_live_whisper_model(engine),
+        "live_vad": _ask_live_vad(),
         "live_language": _ask_live_language(),
         "live_llm_model": _ask_live_llm_model(),
         "live_llm_base_url": _ask_live_base_url(),
@@ -302,6 +306,22 @@ def _ask_live_whisper_model(engine: str) -> str:
     chosen = model or default
     console.print(f"[green]✓ モデル: {chosen}[/green]")
     return chosen
+
+
+def _ask_live_vad() -> str:
+    """ライブ用の VAD（音声区間検出）を選ばせる。不正な入力は再入力"""
+    console.print("\n[bold]ライブ文字起こしの VAD（音声区間検出）を選択してください:[/bold]")
+    console.print("  silero: 入力が小さくても安定(推奨) / energy: 軽量だが入力音量に敏感")
+    while True:
+        choice = (
+            Prompt.ask(f"[bold]VAD ({'/'.join(LIVE_VAD_CHOICES)})[/bold]", default=DEFAULT_LIVE_VAD)
+            .strip()
+            .lower()
+        )
+        if choice in LIVE_VAD_CHOICES:
+            console.print(f"[green]✓ VAD: {choice}[/green]")
+            return choice
+        console.print(f"[red]✗ {' または '.join(LIVE_VAD_CHOICES)} を入力してください。[/red]")
 
 
 def _ask_live_language() -> str:

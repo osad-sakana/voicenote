@@ -10,6 +10,7 @@ from config import (
     DEFAULT_LIVE_LLM_BASE_URL,
     DEFAULT_LIVE_LLM_MODEL,
     DEFAULT_LIVE_MLX_WHISPER_MODEL,
+    DEFAULT_LIVE_VAD,
     DEFAULT_LIVE_WHISPER_MODEL,
     InvalidConfigError,
     VoiceNoteConfig,
@@ -86,7 +87,7 @@ class TestVoiceNoteConfigDefaults:
         assert config.live_engine == "faster-whisper"
         assert config.live_whisper_model == "small"
         assert config.live_language == ""
-        assert config.live_vad == "energy"
+        assert config.live_vad == "silero"
         assert config.live_llm_enabled is True
         assert config.live_llm_base_url == "http://127.0.0.1:11434/v1"
         assert config.live_llm_model == "qwen2.5:7b"
@@ -251,6 +252,27 @@ class TestLiveConfigPersistence:
         assert loaded.live_engine == "mlx"
         assert loaded.live_whisper_model == "small"
 
+    def test_legacy_config_without_live_vad_uses_silero(self, tmp_path: Path):
+        """旧 config.json（live_vad キー無し）は新既定の silero で読み込む。"""
+        path = tmp_path / "config.json"
+        path.write_text(
+            json.dumps({"save_folder": "/tmp/x", "live_engine": "faster-whisper"}),
+            encoding="utf-8",
+        )
+        loaded = load_config(path)
+        assert loaded is not None
+        assert loaded.live_vad == "silero" == DEFAULT_LIVE_VAD
+
+    def test_explicit_energy_vad_is_respected(self, tmp_path: Path):
+        """live_vad に energy が明示されていれば既定より優先する。"""
+        path = tmp_path / "config.json"
+        path.write_text(
+            json.dumps({"save_folder": "/tmp/x", "live_vad": "energy"}), encoding="utf-8"
+        )
+        loaded = load_config(path)
+        assert loaded is not None
+        assert loaded.live_vad == "energy"
+
     def test_unknown_live_like_keys_are_ignored(self):
         config = VoiceNoteConfig.from_dict({"save_folder": "/tmp", "live_unknown": 1})
         assert config == VoiceNoteConfig(save_folder="/tmp")
@@ -293,12 +315,14 @@ class TestConfigureLiveInteractive:
 
     def test_collects_live_settings(self, monkeypatch):
         _fake_prompts(
-            monkeypatch, ["y", "1", "large-v3-turbo", "ja", "qwen3:8b", "http://localhost:11434/v1"]
+            monkeypatch,
+            ["y", "1", "large-v3-turbo", "energy", "ja", "qwen3:8b", "http://localhost:11434/v1"],
         )
         overrides = configure_live_interactive()
         assert overrides == {
             "live_engine": "mlx",
             "live_whisper_model": "large-v3-turbo",
+            "live_vad": "energy",
             "live_language": "ja",
             "live_llm_model": "qwen3:8b",
             "live_llm_base_url": "http://localhost:11434/v1",
@@ -310,7 +334,9 @@ class TestConfigureLiveInteractive:
     def test_model_prompt_default_depends_on_engine(self, monkeypatch, choice, expected_default):
         defaults: list[str | None] = []
 
-        answers = iter(["y", choice, None, "", DEFAULT_LIVE_LLM_MODEL, DEFAULT_LIVE_LLM_BASE_URL])
+        answers = iter(
+            ["y", choice, None, "silero", "", DEFAULT_LIVE_LLM_MODEL, DEFAULT_LIVE_LLM_BASE_URL]
+        )
 
         def fake_ask(question, *args, **kwargs):
             answer = next(answers)
@@ -326,21 +352,30 @@ class TestConfigureLiveInteractive:
 
     def test_blank_model_falls_back_to_engine_default(self, monkeypatch):
         _fake_prompts(
-            monkeypatch, ["y", "1", "  ", "", DEFAULT_LIVE_LLM_MODEL, DEFAULT_LIVE_LLM_BASE_URL]
+            monkeypatch,
+            ["y", "1", "  ", "silero", "", DEFAULT_LIVE_LLM_MODEL, DEFAULT_LIVE_LLM_BASE_URL],
         )
         assert configure_live_interactive()["live_whisper_model"] == "large-v3-turbo"
 
     def test_custom_model_is_kept(self, monkeypatch):
         _fake_prompts(
             monkeypatch,
-            ["y", "2", " medium ", "", DEFAULT_LIVE_LLM_MODEL, DEFAULT_LIVE_LLM_BASE_URL],
+            ["y", "2", " medium ", "silero", "", DEFAULT_LIVE_LLM_MODEL, DEFAULT_LIVE_LLM_BASE_URL],
         )
         assert configure_live_interactive()["live_whisper_model"] == "medium"
 
     def test_faster_whisper_choice_and_auto_language(self, monkeypatch):
         _fake_prompts(
             monkeypatch,
-            ["y", "2", "small", "auto", DEFAULT_LIVE_LLM_MODEL, DEFAULT_LIVE_LLM_BASE_URL],
+            [
+                "y",
+                "2",
+                "small",
+                "silero",
+                "auto",
+                DEFAULT_LIVE_LLM_MODEL,
+                DEFAULT_LIVE_LLM_BASE_URL,
+            ],
         )
         overrides = configure_live_interactive()
         assert overrides["live_engine"] == "faster-whisper"
@@ -349,11 +384,20 @@ class TestConfigureLiveInteractive:
     def test_invalid_engine_choice_is_reasked(self, monkeypatch):
         asked = _fake_prompts(
             monkeypatch,
-            ["y", "9", "2", "small", "", DEFAULT_LIVE_LLM_MODEL, DEFAULT_LIVE_LLM_BASE_URL],
+            [
+                "y",
+                "9",
+                "2",
+                "small",
+                "silero",
+                "",
+                DEFAULT_LIVE_LLM_MODEL,
+                DEFAULT_LIVE_LLM_BASE_URL,
+            ],
         )
         overrides = configure_live_interactive()
         assert overrides["live_engine"] == "faster-whisper"
-        assert len(asked) == 7
+        assert len(asked) == 8
 
     def test_non_loopback_base_url_is_reasked(self, monkeypatch):
         _fake_prompts(
@@ -362,6 +406,7 @@ class TestConfigureLiveInteractive:
                 "y",
                 "2",
                 "small",
+                "silero",
                 "",
                 "qwen2.5:7b",
                 "http://example.com/v1",
@@ -370,3 +415,60 @@ class TestConfigureLiveInteractive:
         )
         overrides = configure_live_interactive()
         assert overrides["live_llm_base_url"] == "http://127.0.0.1:11434/v1"
+
+
+def _vad_prompts(monkeypatch, vad_answers: list[str | None]) -> tuple[list[str], list]:
+    """VAD の質問だけ vad_answers を返し、他は既定値で答えるスタブ。
+
+    None は既定値（kwargs["default"]）をそのまま受け入れる。
+    Returns:
+        (VAD 質問で渡された既定値の記録, VAD 質問の回数を数えるためのリスト)
+    """
+    vad_defaults: list = []
+    remaining_vad = list(vad_answers)
+    fixed = iter(["y", "2", "small"])
+
+    def fake_ask(question, *args, **kwargs):
+        if "VAD" in question:
+            vad_defaults.append(kwargs.get("default"))
+            answer = remaining_vad.pop(0)
+            return kwargs["default"] if answer is None else answer
+        try:
+            return next(fixed)
+        except StopIteration:
+            return kwargs.get("default", "")
+
+    monkeypatch.setattr(config_module.Prompt, "ask", staticmethod(fake_ask))
+    return vad_defaults, remaining_vad
+
+
+class TestConfigureLiveVad:
+    def test_default_is_silero(self, monkeypatch):
+        vad_defaults, _ = _vad_prompts(monkeypatch, [None])
+        overrides = configure_live_interactive()
+        assert vad_defaults == ["silero"]
+        assert overrides["live_vad"] == "silero"
+
+    @pytest.mark.parametrize("answer,expected", [("silero", "silero"), ("energy", "energy")])
+    def test_each_choice(self, monkeypatch, answer, expected):
+        _vad_prompts(monkeypatch, [answer])
+        assert configure_live_interactive()["live_vad"] == expected
+
+    def test_choice_is_normalized(self, monkeypatch):
+        _vad_prompts(monkeypatch, ["  Energy "])
+        assert configure_live_interactive()["live_vad"] == "energy"
+
+    def test_invalid_choice_is_reasked(self, monkeypatch):
+        vad_defaults, remaining = _vad_prompts(monkeypatch, ["webrtc", "vad", "energy"])
+        overrides = configure_live_interactive()
+        assert overrides["live_vad"] == "energy"
+        assert len(vad_defaults) == 3
+        assert remaining == []
+
+    def test_vad_is_asked_after_engine_and_model(self, monkeypatch):
+        asked = _fake_prompts(
+            monkeypatch,
+            ["y", "2", "small", "silero", "", DEFAULT_LIVE_LLM_MODEL, DEFAULT_LIVE_LLM_BASE_URL],
+        )
+        configure_live_interactive()
+        assert "VAD" in asked[3]

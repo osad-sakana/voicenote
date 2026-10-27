@@ -185,7 +185,7 @@ class TestLiveSettings:
         assert settings.engine == "faster-whisper"
         assert settings.model == "small"
         assert settings.language is None
-        assert settings.vad == "energy"
+        assert settings.vad == "silero"
         assert settings.llm_enabled is True
         assert settings.llm_base_url == "http://127.0.0.1:11434/v1"
         assert settings.llm_model == "qwen2.5:7b"

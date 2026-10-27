@@ -113,6 +113,7 @@ Both GUI (`main.py`) and CLI (`main_cli.py`) delegate the core workflow to `pipe
 - **Whisper Configuration**: Local mode uses CPU device with int8 compute_type, auto language detection, beam_size=5. OpenAI mode uses whisper-1 model with 25MB file size limit.
 - **Live Mode — WAV is the source of truth**: live text is best-effort (chunks/segments may be dropped under load, engine errors are skipped with a warning). The WAV on Desktop is always complete
 - **Live Mode — stop-order invariant**: "WAV finalized → stream stopped → live drain". Never make WAV finalization wait for the live session; `session.stop()` is called only after `record_audio` returns, and is bounded by a timeout even if the engine or LLM hangs
+- **Live Mode — VAD**: default is `silero` (`DEFAULT_LIVE_VAD`, selectable in `--config`). The energy VAD (-40 dB threshold) misses most speech on quiet input (real 456 s recording at RMS -47 dB: energy 25 segments / 61 s vs silero 56 / 199 s). If Silero fails to load, `create_vad` falls back to `EnergyVAD` and `live_cli` prints a yellow warning (detected via `vad_kind`)
 - **Live Mode — local only**: the summary LLM URL must be loopback (`is_loopback_url`); non-loopback URLs are rejected
 - **Transcription Output**: Markdown files named `YYYY-MM-DD_HHMMSS_raw.md` with YAML frontmatter containing created timestamp, type=transcription, tags=[recording, raw]
 
