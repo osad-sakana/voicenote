@@ -37,7 +37,7 @@ uv run main.py --list-devices
 uv run main.py --device "BlackHole 2ch"
 uv run main.py --device 2
 
-# Live mode: record + real-time local transcription + rolling local-LLM summary (CLI only)
+# Live mode: record + real-time local transcription + rolling local-LLM summary (CLI; in the GUI choose the "ライブ" mode)
 uv run main_cli.py --live
 uv run main_cli.py --live --device "BlackHole 2ch"
 ```
@@ -77,7 +77,16 @@ Dependencies are managed in `pyproject.toml`. Use `uv sync` to install dependenc
   - `engines.py` (`create_engine`: faster-whisper / mlx), `hallucination.py` (filters Whisper boilerplate)
   - `local_llm.py` (loopback-only OpenAI-compatible client, `probe`), `summarizer.py` (`RollingSummarizer`), `language_guard.py` (`is_plausible_japanese`: rejects summaries with Chinese mixed in — Han without any kana, or lines whose Han chars are ≥ `SIMPLIFIED_LINE_RATIO` simplified-only glyphs; the glyph set excludes anything in JIS X 0208)
   - `note.py` (`render_live_note`, pure), `view.py` (`LiveView`, Rich rendering state)
+  - `bootstrap.py` (shared by CLI and GUI): engine / VAD / local-LLM backend creation and fallback decisions (`build_engine`, `build_vad`, `check_backend`); UI-agnostic, notifies via callbacks, fatal errors raise `LiveSetupError`, all heavy deps injected
+  - `model_fetch.py`: Whisper model download from the HuggingFace Hub with byte progress (used by the GUI before recording starts); `huggingface_hub` / `faster_whisper` / `tqdm` are imported lazily inside functions
+  - `level_meter.py`: `LevelMeter` (latest RMS dBFS + history, fed from the audio callback via `tee`) and `assess_input_level` (90th percentile < -40 dB → "input too low")
 - **gui/**: GUI components — App (main window), SettingsDialog, ThreadSafeUIQueue, constants
+  - `mode_logic.py` (pure): window size per mode (`window_spec`: live 760x640 resizable, others fixed 520x380/560), exec-button text for non-live modes, `other_mode_rejection` (blocks normal recording / transcribe-only while live is active)
+  - `live_state.py` (pure): `LiveViewState` / `LivePhase` and reducers; `new_display_lines` computes text-box deltas
+  - `live_workflow.py` (+ `live_workflow_*.py` helpers): `LiveWorkflow` — Tk-independent lifecycle and threads of GUI live mode (public API: `LiveWorkflow`, `LiveWorkflowCallbacks`, `validate_live_start`, `LiveDeps`, `MeterReading`, `BANNER_*`)
+  - `live_view_logic.py` (pure): `button_spec(phase)`, status / banner / meter / delay text, `plan_segment_render` (redraws when a new run resets the segment count)
+  - `live_layout.py` (widget construction only), `live_panel.py` (`LivePanel`: thin widget-update layer), `live_controller.py` (`LiveController`: wires `LiveWorkflow` to App — every callback goes through `ui_queue.submit`, `poll_meter` every 250 ms, completion / "高精度で文字起こし")
+  - `live_settings_form.py`: the "ライブ" tab of SettingsDialog
 
 ### Data Flow
 
@@ -103,6 +112,14 @@ Both GUI (`main.py`) and CLI (`main_cli.py`) delegate the core workflow to `pipe
 2. **Recording Phase**: `LiveSession.start()` then `record_audio(chunk_sink=session.feed)`. `feed` only does a non-blocking enqueue; Framer → VAD → Segmenter → engine → hallucination filter run on worker threads, and the summary is held while transcription is behind (`backlog_sec`)
 3. **Stop Phase**: `record_audio` returns (WAV finalized, stream stopped) → `session.stop(timeout)` (flush, drain, one final summary) → `note_writer.save_live_note` → `{save_folder}/YYYY-MM-DD_HHMMSS_live.md` (type: live-transcription, tags: [recording, live])
 4. The user is told to run `uv run main_cli.py --file <wav>` for an accurate full transcript
+
+**Live Mode (GUI, mode "ライブ")**:
+1. **Prepare Phase (PREPARING)**: `validate_live_start` (save folder, device, live settings, mic not busy) → `LiveWorkflow.start()` → worker thread: `bootstrap.build_engine` (mlx → faster-whisper fallback banner) → `model_fetch` download if not cached (progress banner) → `check_backend` (Ollama missing → banner, continue without summary) → `build_vad` → `LiveSession.start()` → `ThreadedRecorder` with `tee(LevelMeter.feed, session.feed)`. The stop button cancels while preparing
+2. **Recording Phase (RECORDING)**: segments / summary / warnings arrive as `LiveViewState` via `on_state` (wrapped in `ui_queue.submit`); App polls `poll_meter()` every 250 ms (input level, `backlog_sec`, dropped chunks; low input → banner)
+3. **Stop Phase (FINALIZING)**: same invariant as CLI — `finalize_recording()` (WAV on disk) → `stop_with_timeout()` → only then the live drain, on separate threads
+4. **Drain Phase (DRAINING)**: `session.stop(timeout)` transcribes the rest and makes the final summary. The button becomes "中断して保存": aborting abandons the wait and saves a partial note (`complete=False`) from the segments/summary collected by the GUI
+5. **Save Phase (SAVING → IDLE)**: `note_writer.save_live_note` → `{save_folder}/YYYY-MM-DD_HHMMSS_live.md`; App shows WAV/note paths and "高精度で文字起こし" (switches to "文字起こしだけする" with the WAV path filled in). Closing the window calls `live.shutdown()` (WAV finalized + partial note saved synchronously). The WAV is the source of truth
+6. **Mutual exclusion**: `can_start` = App not busy and `RecordingWorkflow` not recording; normal recording / transcribe-only check `live.is_active` first. Mode selector, device menu and settings are locked while the live phase is not IDLE
 
 ### Important Implementation Details
 

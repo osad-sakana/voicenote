@@ -97,6 +97,18 @@ class RecordingWorkflow:
     def update_config(self, config: VoiceNoteConfig) -> None:
         self._config = config
 
+    def has_pending_close(self) -> bool:
+        """タイムアウトで放棄したストリームが猶予内でまだ解放中なら True (状態は変えない)。
+
+        ライブ側の開始判定から参照する。猶予の判定は start() と同じ (stop_timeout の3倍)。
+        """
+        recorder = self._pending_close_recorder
+        if recorder is None:
+            return False
+        since = self._pending_close_since
+        elapsed = 0.0 if since is None else time.monotonic() - since
+        return recorder.is_closing() and elapsed < self._stop_timeout * 3
+
     def start(self, device_id: int | None, device_label: str, rec_dest: Path) -> str | None:
         """録音を開始する。失敗時はエラーメッセージを返す。"""
         if self._stopping:

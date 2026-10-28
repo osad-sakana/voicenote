@@ -5,7 +5,9 @@ import re
 MODE_RECORD_TRANSCRIBE = "録音して文字起こしする"
 MODE_RECORD_ONLY = "録音だけする"
 MODE_TRANSCRIBE_ONLY = "文字起こしだけする"
-MODES = [MODE_RECORD_TRANSCRIBE, MODE_RECORD_ONLY, MODE_TRANSCRIBE_ONLY]
+MODE_LIVE = "ライブ"  # 録音しながらリアルタイム文字起こし + 要約
+MODES = [MODE_RECORD_TRANSCRIBE, MODE_RECORD_ONLY, MODE_TRANSCRIBE_ONLY, MODE_LIVE]
+DEFAULT_MODE = MODE_LIVE  # 起動時に選ばれているモード
 
 _EMOJI_RE = re.compile(
     "[\U0001f000-\U0001ffff⌀-⟿⤀-⯿​-‏︀-️]+",
