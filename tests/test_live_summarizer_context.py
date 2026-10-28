@@ -51,6 +51,10 @@ class TestBuildMessagesWithContext:
         assert "必ず日本語で出力する" in system
         assert "『現在の話題:』『進捗:』をこの表記のまま" in system
         assert "入力に無い内容を追加しない" in system
+        # 事実の捏造を防ぐ規則も参考情報ありで維持する
+        assert "文字起こしに無い数値・固有名詞・結論・決定事項を足さない" in system
+        assert "不明な点は書かない" in system
+        assert "『現在の話題:』は直近の文字起こしから判断する" in system
 
     def test_participants_block(self):
         user = _user(self._messages(memo=""))
@@ -105,6 +109,15 @@ class TestBuildMessagesWithContext:
         assert user.count("\n- p") == MAX_PARTICIPANTS
         assert "m" * MAX_MEMO_CHARS in user
         assert "m" * (MAX_MEMO_CHARS + 1) not in user
+
+    def test_public_helpers_match_build_messages(self):
+        # 全文要約（live.full_summary）が再利用する公開名
+        from live.summarizer import CONTEXT_RULES, render_context_blocks
+
+        ctx = LiveContext(participants=("田中",), memo="議題: 予算")
+        messages = build_messages("", "発言", max_chars=100, context=ctx)
+        assert CONTEXT_RULES in _system(messages)
+        assert _user(messages).startswith(render_context_blocks(ctx))
 
     def test_max_chars_applies_only_to_transcript(self):
         ctx = LiveContext(memo="あ" * 50)
