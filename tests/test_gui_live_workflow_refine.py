@@ -362,3 +362,16 @@ def test_refine_runs_on_dedicated_thread(tmp_path):
     h.wf.stop()
     assert "live-refine" in names
     assert threading.active_count() >= 1
+
+
+def test_unexpected_refine_result_still_finishes_once(tmp_path):
+    """想定外の戻り値・例外でも REFINING に取り残さず、速報版で on_done を1回だけ呼ぶ"""
+    h = _harness(tmp_path)
+    h.refine.result = object()  # complete 属性を持たない
+    h.start()
+    h.wf.stop()
+    assert h.state.phase is LivePhase.IDLE
+    assert h.spy.done == [(h.wav, _fast_note(h))]
+    assert h.overwrites == []
+    assert h.wf._engine_lock.acquire(timeout=0.01)
+    h.wf._engine_lock.release()

@@ -270,7 +270,12 @@ class RefineLifecycle:
             notify=lambda msg: self._safe(self._callbacks.on_log, msg),
         )
         progress = ProgressThrottle(self._clock, lambda t: self._banner(run, BANNER_REFINE, t))
-        outcome = runner.run(job, run.cancel, progress, lambda: self.context)
+        try:
+            outcome = runner.run(job, run.cancel, progress, lambda: self.context)
+        except Exception as e:
+            # 想定外の失敗でも REFINING に取り残さず、速報版のまま完了させる
+            _logger.error("高精度の再文字起こしで未捕捉の例外: %s", type(e).__name__)
+            outcome = _keep(f"高精度の再文字起こしに失敗しました（{type(e).__name__}）")
         with self._lock:
             if run.gen != self._gen or self._state.phase is not LivePhase.REFINING:
                 return  # 中断済み(速報版で完了通知済み)
