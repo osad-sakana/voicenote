@@ -32,6 +32,7 @@ class LivePhase(Enum):
     RECORDING = "recording"
     FINALIZING = "finalizing"
     DRAINING = "draining"
+    REFINING = "refining"  # 速報版ノート保存後、WAV 全体を高精度モデルで再文字起こし中
     SAVING = "saving"
 
 

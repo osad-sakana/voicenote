@@ -16,7 +16,9 @@ from typing import Any
 
 from .constants import strip_emoji
 from .live_state import DisplayDelta, LiveBanner, LivePhase, LiveViewState, new_display_lines
-from .live_workflow import BANNER_MODEL_DOWNLOAD
+from .live_workflow import BANNER_MODEL_DOWNLOAD, BANNER_REFINE
+
+_PROGRESS_BANNERS = (BANNER_MODEL_DOWNLOAD, BANNER_REFINE)  # 進捗バーを出すバナー
 
 LEVEL_FLOOR_DB = -60.0  # メーターの左端(これ以下は 0 として描く)
 BACKLOG_WARN_SEC = 5.0  # 文字起こしの遅れがこれ以上なら強調表示する
@@ -29,7 +31,7 @@ class ButtonAction(Enum):
 
     START = "start"
     STOP = "stop"  # PREPARING は取り消し、RECORDING は停止
-    ABORT = "abort"  # ドレインを中断して部分ノートを保存
+    ABORT = "abort"  # ドレイン・再文字起こしを中断して保存済み/部分ノートを残す
     NONE = "none"
 
 
@@ -53,6 +55,7 @@ _BUTTONS = {
     LivePhase.RECORDING: ButtonSpec("停止", ButtonStyle.DANGER, True, ButtonAction.STOP),
     LivePhase.FINALIZING: ButtonSpec("保存中...", ButtonStyle.SECONDARY, False, ButtonAction.NONE),
     LivePhase.DRAINING: ButtonSpec("中断して保存", ButtonStyle.SECONDARY, True, ButtonAction.ABORT),
+    LivePhase.REFINING: ButtonSpec("中断して保存", ButtonStyle.SECONDARY, True, ButtonAction.ABORT),
     LivePhase.SAVING: ButtonSpec("保存中...", ButtonStyle.SECONDARY, False, ButtonAction.NONE),
 }
 
@@ -61,6 +64,7 @@ _PHASE_STATUS = {
     LivePhase.PREPARING: "ライブの準備中...",
     LivePhase.FINALIZING: "録音データを確定しています...",
     LivePhase.DRAINING: "残りの区間を文字起こし・最終要約を作成中...",
+    LivePhase.REFINING: "高精度で再文字起こし中...",
     LivePhase.SAVING: "ライブノートを保存しています...",
 }
 
@@ -104,7 +108,7 @@ def plan_segment_render(state: LiveViewState, rendered_count: int) -> SegmentRen
 
 
 def download_fraction(text: str) -> float | None:
-    """モデル取得バナーの「（NN%）」から進捗 0..1 を取り出す。総量不明なら None"""
+    """進捗バナー(モデル取得・再文字起こし)の「NN%」から進捗 0..1 を取り出す。不明なら None"""
     match = _PERCENT.search(text or "")
     if match is None:
         return None
@@ -126,7 +130,7 @@ def banner_view(banners: Iterable[LiveBanner]) -> BannerView:
     """案内バナーをまとめた表示内容(絵文字は macOS Tk 対策で除く)"""
     items = tuple(banners)
     text = "\n".join(t for t in (strip_emoji(b.text) for b in items) if t)
-    download = next((b for b in items if b.kind == BANNER_MODEL_DOWNLOAD), None)
+    download = next((b for b in items if b.kind in _PROGRESS_BANNERS), None)
     if download is None:
         return BannerView(text, False, None)
     return BannerView(text, True, download_fraction(download.text))

@@ -19,12 +19,16 @@ from config import VoiceNoteConfig
 from live import engines, local_llm, model_fetch, vad
 from live.bootstrap import BackendCheck
 from live.context import LiveContext
+from live.full_summary import summarize_full
 from live.level_meter import ChunkSink, InputLevelAssessment, LevelMeter
 from live.model_fetch import ProgressCallback, RepoSpec
-from live.refine import format_refine_progress  # noqa: F401 (GUI 向けに再エクスポート)
+from live.refine import (
+    format_refine_progress,  # noqa: F401 (GUI 向けに再エクスポート)
+    refine_wav,
+)
 from live.session import LiveSession
 from live.session_models import LiveSettings
-from note_writer import save_live_note
+from note_writer import overwrite_live_note, save_live_note
 from recorder import ThreadedRecorder
 
 from .devices import parse_device_id
@@ -154,6 +158,9 @@ class LiveDeps:
     model_fetcher: ModelFetcher = field(default_factory=ModelFetcher)
     meter_factory: Callable[[], LevelMeter] = LevelMeter
     note_saver: Callable[..., Path] = save_live_note
+    refine_fn: Callable[..., Any] = refine_wav
+    full_summarizer: Callable[..., str | None] = summarize_full
+    note_overwriter: Callable[..., Path] = overwrite_live_note
 
 
 @dataclass(frozen=True)

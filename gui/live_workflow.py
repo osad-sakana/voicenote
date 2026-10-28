@@ -2,6 +2,8 @@
 
 状態遷移: IDLE → PREPARING → RECORDING → FINALIZING → DRAINING → SAVING → IDLE
 (PREPARING の失敗・取り消しと、DRAINING の中断はそれぞれ IDLE / SAVING へ分岐する)
+停止後の高精度再文字起こしを行う場合は、速報版ノートの保存後に SAVING → REFINING → SAVING → IDLE
+(REFINING の中断は待たずに IDLE。on_done は最後に1回だけ、速報版または上書き後のノートで呼ぶ)
 
 停止順序の不変条件「WAV確定 → ストリーム停止 → ライブのドレイン」: finalize_recording() の後で
 stop_with_timeout()、session.stop() はさらに別スレッドで実行する。ドレインはコア側でキャンセル
@@ -45,12 +47,14 @@ from .live_state import (
     set_phase,
     to_live_result,
 )
+from .live_workflow_refine import RefineLifecycle
 from .live_workflow_support import (
     BANNER_ENGINE_FALLBACK,
     BANNER_EXTERNAL_SEND,
     BANNER_LOW_INPUT,
     BANNER_MODEL_DOWNLOAD,
     BANNER_OLLAMA,
+    BANNER_REFINE,
     BANNER_VAD_FALLBACK,
     ENGINE_LOCK_TIMEOUT_SEC,
     PROGRESS_INTERVAL_SEC,
@@ -60,6 +64,7 @@ from .live_workflow_support import (
     ModelFetcher,
     external_send_banner_text,
     format_download_progress,
+    format_refine_progress,
     validate_live_start,
 )
 from .live_workflow_support import Cancelled as _Cancelled
@@ -78,6 +83,7 @@ __all__ = [
     "BANNER_LOW_INPUT",
     "BANNER_MODEL_DOWNLOAD",
     "BANNER_OLLAMA",
+    "BANNER_REFINE",
     "BANNER_VAD_FALLBACK",
     "PROGRESS_INTERVAL_SEC",
     "LiveDeps",
@@ -87,6 +93,7 @@ __all__ = [
     "ModelFetcher",
     "external_send_banner_text",
     "format_download_progress",
+    "format_refine_progress",
     "validate_live_start",
 ]
 
@@ -101,8 +108,11 @@ STREAM_CLOSE_GRACE_FACTOR = 3  # 放棄ストリームの解放を stop_timeout 
 MLX_INSTALL_HINT = "uv sync --extra live-mlx"
 
 
-class LiveWorkflow:
-    """ライブ録音の準備 → 録音 → WAV確定 → ドレイン → ノート保存を管理する"""
+class LiveWorkflow(RefineLifecycle):
+    """ライブ録音の準備 → 録音 → WAV確定 → ドレイン → ノート保存を管理する
+
+    停止後の高精度再文字起こし(REFINING)の段階は RefineLifecycle(live_workflow_refine)にある。
+    """
 
     def __init__(
         self,
@@ -145,6 +155,11 @@ class LiveWorkflow:
         self._pending_close_recorder = None
         self._pending_close_since: float | None = None
         self._closed = False
+        # 停止後の再文字起こしに使う、実行中の設定・エンジン・要約バックエンドと保存済みのノート
+        self._live_settings: LiveSettings | None = None
+        self._live_engine = None
+        self._backend = None
+        self._refine_note: tuple[Path, Path] | None = None  # (wav, 速報版ノート)
         # 参加者・メモ。実行をまたいで保持し(IDLE でも次回の開始で使う)、保存時は最新の値を使う
         self._context = LiveContext()
 
@@ -247,14 +262,30 @@ class LiveWorkflow:
     def abort_drain(self) -> bool:
         """ドレインの待ちを放棄し、ここまでの区間と要約で部分ノートを保存する
 
+        REFINING 中なら再文字起こしを取り消し、待たずに速報版ノートで完了する。
+
         Returns:
-            DRAINING 中で中断を受け付けたら True
+            DRAINING / REFINING 中で中断を受け付けたら True
         """
         with self._lock:
             run = self._run
-            if run is None or self._state.phase is not LivePhase.DRAINING:
+            if run is None:
                 return False
-            wav, session, state = self._take_over_drain()
+            if self._state.phase is LivePhase.REFINING:
+                wav, note = self._take_over_refine()
+                refining = True
+            elif self._state.phase is LivePhase.DRAINING:
+                wav, session, state = self._take_over_drain()
+                refining = False
+            else:
+                return False
+        if refining:
+            self._safe(
+                self._callbacks.on_log, "高精度の再文字起こしを中断しました（速報版を残します）"
+            )
+            self._finish_run(run)
+            self._safe(self._callbacks.on_done, wav, note)
+            return True
         self._safe(self._callbacks.on_log, "ドレインを中断し、ここまでの内容でノートを保存します")
         result = to_live_result(state, dropped_chunks=_dropped_chunks(session), complete=False)
         try:
@@ -304,11 +335,13 @@ class LiveWorkflow:
                 phase is LivePhase.FINALIZING and self._drain_wav is not None
             ):
                 wav, session, state = self._take_over_drain()
+            elif phase is LivePhase.REFINING:
+                self._take_over_refine()  # 速報版ノートは保存済み。再文字起こしは取り消す
             else:
                 return  # PREPARING は取り消し済み、それ以外はワーカーが完走する
         if phase is LivePhase.RECORDING:
             self._shutdown_recording(run, recorder, session, state)
-        else:
+        elif phase is not LivePhase.REFINING:
             self._write_partial_note(run, state, session, wav)
         self._finish_run(run)
 
@@ -416,6 +449,9 @@ class LiveWorkflow:
             self._meter = None
             self._drain_wav = None
             self._drain_thread = None
+            self._live_settings = self._live_engine = self._backend = None
+            self._refine_note = None
+            self._update(clear_banner, BANNER_REFINE)
             if self._pending_close_recorder is not None and self._pending_close_since is None:
                 self._pending_close_since = self._clock()
             self._update(set_phase, LivePhase.IDLE)
@@ -461,7 +497,9 @@ class LiveWorkflow:
             raise LiveSetupError(f"ライブ文字起こしの設定が不正です: {e}") from e
         engine, settings = self._build_engine(settings, run)
         self._check_cancel(run)
-        self._ensure_model(settings, run)
+        self._ensure_model(settings.engine, settings.model, run)
+        self._check_cancel(run)
+        settings = self._ensure_refine_model(settings, run)
         self._check_cancel(run)
         backend = self._prepare_backend(settings, run)
         detector = build_vad(
@@ -472,11 +510,12 @@ class LiveWorkflow:
         )
         self._check_cancel(run)
         context = self.context
+        serialized = _SerializedEngine(
+            engine, self._engine_lock, load_timeout=self._engine_lock_timeout
+        )
         session = self._deps.session_factory(
             settings,
-            engine=_SerializedEngine(
-                engine, self._engine_lock, load_timeout=self._engine_lock_timeout
-            ),
+            engine=serialized,
             vad=detector,
             backend=backend,
             callbacks=self._session_callbacks(run),
@@ -486,6 +525,7 @@ class LiveWorkflow:
         with self._lock:
             self._session = session
             self._meter = meter
+            self._live_settings, self._live_engine, self._backend = settings, serialized, backend
             if self._context is not context:  # セッション生成中に更新された
                 _push_context(session, self._context)
         # engine.load() は session の asr スレッドで行う(mlx は load と transcribe を同じスレッドで)
@@ -539,18 +579,18 @@ class LiveWorkflow:
             install_hint=MLX_INSTALL_HINT,
         )
 
-    def _ensure_model(self, settings: LiveSettings, run: _Run) -> None:
-        """実際に使うエンジン・モデルが未取得ならダウンロードする。失敗は LiveSetupError"""
+    def _ensure_model(self, engine_name: str, model: str, run: _Run) -> None:
+        """エンジン・モデルが未取得ならダウンロードする。失敗は LiveSetupError"""
         fetcher = self._deps.model_fetcher
         try:
-            repo = fetcher.resolve_repo(settings.engine, settings.model)
+            repo = fetcher.resolve_repo(engine_name, model)
         except ValueError as e:
             raise LiveSetupError(str(e)) from e
         if repo is None or fetcher.is_cached(repo):
             return
-        self._banner(run, BANNER_MODEL_DOWNLOAD, format_download_progress(settings.model, 0, 0))
+        self._banner(run, BANNER_MODEL_DOWNLOAD, format_download_progress(model, 0, 0))
         progress = _DownloadProgress(
-            settings.model, self._clock, lambda text: self._banner(run, BANNER_MODEL_DOWNLOAD, text)
+            model, self._clock, lambda text: self._banner(run, BANNER_MODEL_DOWNLOAD, text)
         )
         try:
             fetcher.fetch(repo, progress)
@@ -560,7 +600,7 @@ class LiveWorkflow:
             raise LiveSetupError(info.message) from e
         finally:
             self._update_for(run, clear_banner, BANNER_MODEL_DOWNLOAD)
-        self._safe(self._callbacks.on_log, f"音声認識モデル {settings.model} を取得しました")
+        self._safe(self._callbacks.on_log, f"音声認識モデル {model} を取得しました")
 
     def _prepare_backend(self, settings: LiveSettings, run: _Run):
         """ローカルLLM の疎通を確認する。使えなければバナーを出し、要約なしで続行する"""
@@ -639,9 +679,15 @@ class LiveWorkflow:
         thread.start()
 
     def _drain_worker(self, run: _Run, session, wav: Path) -> None:
-        """session.stop() でドレインし、ノートを保存する。中断されていれば結果を捨てる"""
+        """session.stop() でドレインし、ノートを保存する。中断されていれば結果を捨てる
+
+        再文字起こしを予定していれば全文要約は省く(LLM とメモリを奪い合わないため)。
+        """
+        refine = self._plan_refine()
         try:
-            result: LiveResult | None = session.stop(timeout=self._session_stop_timeout)
+            result: LiveResult | None = session.stop(
+                timeout=self._session_stop_timeout, rebuild_summary=not refine
+            )
         except Exception:
             _logger.error("session.stop で例外:\n%s", traceback.format_exc())
             result = None
@@ -654,7 +700,7 @@ class LiveWorkflow:
             state = self._state
         if result is None:
             result = to_live_result(state, dropped_chunks=_dropped_chunks(session), complete=False)
-        self._save_note(run, result, wav)
+        self._save_note(run, result, wav, refine=refine)
 
     def _render_and_save(self, run: _Run, result: LiveResult, wav: Path) -> Path:
         config = run.config
@@ -666,8 +712,11 @@ class LiveWorkflow:
             folder, body, audio_file=wav, participants=context.participants
         )
 
-    def _save_note(self, run: _Run, result: LiveResult, wav: Path) -> None:
-        """ライブノートを保存して IDLE に戻り、on_done / on_error を通知する"""
+    def _save_note(self, run: _Run, result: LiveResult, wav: Path, refine: bool = False) -> None:
+        """ライブノートを保存して IDLE に戻り、on_done / on_error を通知する
+
+        refine なら保存した速報版ノートの高精度な上書きへ進む(on_done はその後に1回だけ)。
+        """
         try:
             note = self._render_and_save(run, result, wav)
         except Exception as e:
@@ -679,6 +728,8 @@ class LiveWorkflow:
             )
             return
         self._safe(self._callbacks.on_log, f"ライブノートを保存: {note}")
+        if refine and self._begin_refine(run, result, wav, note):
+            return
         self._finish_run(run)
         self._safe(self._callbacks.on_done, wav, note)
 
