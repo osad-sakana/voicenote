@@ -148,3 +148,11 @@ class LiveResult:
     dropped_chunks: int
     dropped_segments: int = 0
     complete: bool = True
+
+
+@dataclass(frozen=True)
+class RefinedTranscript:
+    """停止後に高精度モデルで WAV 全体を再文字起こしした結果(ライブの速報版とは別に持つ)"""
+
+    segments: tuple[LiveSegment, ...]
+    model: str

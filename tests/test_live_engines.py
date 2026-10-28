@@ -18,6 +18,7 @@ from live.engines import (
     EngineUnavailableError,
     FasterWhisperEngine,
     MlxWhisperEngine,
+    TimedText,
     TranscribedText,
     create_engine,
 )
@@ -393,3 +394,110 @@ def test_mlx_real_device_transcribes_silence():
     result = engine.transcribe(np.zeros(16000, dtype=np.float32), "ja")
     assert isinstance(result, TranscribedText)
     assert isinstance(result.text, str)
+
+
+# --- transcribe_timed / unload(停止後の高精度再文字起こし用) ---
+
+
+def _timed_fw_segment(start, end, text, no_speech_prob=0.1, avg_logprob=-0.3):
+    return types.SimpleNamespace(
+        start=start, end=end, text=text, no_speech_prob=no_speech_prob, avg_logprob=avg_logprob
+    )
+
+
+class TestFasterWhisperTimed:
+    def test_returns_timed_segments(self, fake_fw, samples):
+        engine = FasterWhisperEngine("large-v3")
+        engine.load()
+        fake_fw.instances[0].segments = [
+            _timed_fw_segment(0.0, 1.5, " こんにちは"),
+            _timed_fw_segment(1.5, 3.0, "さようなら", no_speech_prob=0.7, avg_logprob=-1.2),
+        ]
+        result = engine.transcribe_timed(samples, "ja", prompt="用語: X。")
+        assert result == (
+            TimedText(0.0, 1.5, "こんにちは", 0.1, -0.3),
+            TimedText(1.5, 3.0, "さようなら", 0.7, -1.2),
+        )
+        _, kwargs = fake_fw.instances[0].calls[-1]
+        assert kwargs["initial_prompt"] == "用語: X。"
+        assert kwargs["language"] == "ja"
+        assert kwargs["condition_on_previous_text"] is False
+
+    def test_empty_samples_return_empty(self, fake_fw):
+        engine = FasterWhisperEngine("large-v3")
+        assert engine.transcribe_timed(np.zeros(0, dtype=np.float32), None) == ()
+        assert fake_fw.instances == []
+
+    def test_unload_drops_model_and_reload_creates_new(self, fake_fw, samples):
+        engine = FasterWhisperEngine("small")
+        engine.load()
+        engine.unload()
+        assert engine._model is None
+        engine.load()
+        assert len(fake_fw.instances) == 2
+
+    def test_unload_without_load_is_noop(self, fake_fw):
+        FasterWhisperEngine("small").unload()
+
+
+@pytest.fixture
+def fake_mlx_runtime(monkeypatch, fake_mlx):
+    """ModelHolder と mlx.core.clear_cache の偽物を sys.modules に差し込む"""
+    holder = types.SimpleNamespace(model=object(), model_path="mlx-community/whisper-large-v3-mlx")
+    transcribe_module = types.ModuleType("mlx_whisper.transcribe")
+    transcribe_module.ModelHolder = holder
+    core = types.ModuleType("mlx.core")
+    core.clear_cache = MagicMock()
+    mlx_pkg = types.ModuleType("mlx")
+    mlx_pkg.core = core
+    monkeypatch.setitem(sys.modules, "mlx_whisper.transcribe", transcribe_module)
+    monkeypatch.setitem(sys.modules, "mlx", mlx_pkg)
+    monkeypatch.setitem(sys.modules, "mlx.core", core)
+    return types.SimpleNamespace(holder=holder, core=core)
+
+
+class TestMlxTimed:
+    def test_returns_timed_segments(self, fake_mlx, samples):
+        fake_mlx.transcribe.return_value = {
+            "segments": [
+                {"start": 0.0, "end": 2.0, "text": " 一つ目", "no_speech_prob": 0.1},
+                {"start": 2.0, "end": 4.0, "text": "二つ目", "avg_logprob": -0.4},
+            ],
+            "language": "ja",
+        }
+        engine = MlxWhisperEngine("large-v3")
+        result = engine.transcribe_timed(samples, "ja", prompt="参加者: 山田。")
+        assert result == (
+            TimedText(0.0, 2.0, "一つ目", 0.1, None),
+            TimedText(2.0, 4.0, "二つ目", None, -0.4),
+        )
+        _, kwargs = fake_mlx.transcribe.call_args_list[-1]
+        assert kwargs["path_or_hf_repo"] == "mlx-community/whisper-large-v3-mlx"
+        assert kwargs["initial_prompt"] == "参加者: 山田。"
+        assert "beam_size" not in kwargs
+
+    def test_empty_samples_return_empty(self, fake_mlx):
+        engine = MlxWhisperEngine("large-v3")
+        assert engine.transcribe_timed(np.zeros(0, dtype=np.float32), None) == ()
+
+    def test_unload_clears_model_holder_and_cache(self, fake_mlx_runtime, fake_mlx):
+        engine = MlxWhisperEngine("large-v3")
+        engine.load()
+        engine.unload()
+        assert fake_mlx_runtime.holder.model is None
+        assert fake_mlx_runtime.holder.model_path is None
+        fake_mlx_runtime.core.clear_cache.assert_called_once()
+        engine.load()  # 解放後の load はウォームアップをやり直す
+        assert fake_mlx.transcribe.call_count == 2
+
+    def test_unload_falls_back_to_metal_clear_cache(self, fake_mlx_runtime, fake_mlx):
+        del fake_mlx_runtime.core.clear_cache
+        metal = types.SimpleNamespace(clear_cache=MagicMock())
+        fake_mlx_runtime.core.metal = metal
+        MlxWhisperEngine("large-v3").unload()
+        metal.clear_cache.assert_called_once()
+
+    def test_unload_tolerates_missing_runtime(self, fake_mlx, monkeypatch):
+        monkeypatch.setitem(sys.modules, "mlx_whisper.transcribe", None)
+        monkeypatch.setitem(sys.modules, "mlx.core", None)
+        MlxWhisperEngine("large-v3").unload()  # 例外にしない

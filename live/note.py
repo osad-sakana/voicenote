@@ -8,7 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from live.context import MAX_MEMO_CHARS, LiveContext
-from live.session_models import LiveResult
+from live.session_models import LiveResult, LiveSegment, RefinedTranscript
 
 _NO_SUMMARY = "（要約なし）"
 _NO_SEGMENTS = "（文字起こし結果なし）"
@@ -68,11 +68,28 @@ def _context_sections(context: LiveContext | None) -> list[str]:
     return sections
 
 
+def _transcript_lines(segments: tuple[LiveSegment, ...]) -> str:
+    lines = [f"- [{format_timestamp(s.start_sec)}] {s.text}" for s in segments]
+    return "\n".join(lines) if lines else _NO_SEGMENTS
+
+
+def _transcript_sections(result: LiveResult, refined: RefinedTranscript | None) -> list[str]:
+    """文字起こしの節。高精度版があれば先に置き、ライブ版は速報として後ろに残す"""
+    live = _transcript_lines(result.segments)
+    if refined is None:
+        return [f"## 文字起こし\n\n{live}"]
+    return [
+        f"## 文字起こし（高精度: {refined.model}）\n\n{_transcript_lines(refined.segments)}",
+        f"## ライブ文字起こし（速報）\n\n{live}",
+    ]
+
+
 def render_live_note(
     result: LiveResult,
     wav_path: Path | None = None,
     send_warning: str | None = None,
     context: LiveContext | None = None,
+    refined: RefinedTranscript | None = None,
 ) -> str:
     """ライブ文字起こし結果を Markdown 本文(frontmatter なし)に変換する
 
@@ -82,18 +99,18 @@ def render_live_note(
         send_warning: `--file` 再文字起こしが外部送信する場合の警告(external_send_warning の戻り値)
         context: 参加者・メモ。空でない項目だけ「## 参加者」「## メモ」節として要約の後に出す
             (None・空なら従来と同一の出力)
+        refined: 停止後の高精度再文字起こしの結果。あれば「## 文字起こし（高精度: モデル）」の後に
+            「## ライブ文字起こし（速報）」を出す。WAV 全体から作るため、ライブの欠落の注意書きは省く
     """
     summary = result.final_summary.strip() or _NO_SUMMARY
-    lines = [f"- [{format_timestamp(s.start_sec)}] {s.text}" for s in result.segments]
-    transcript = "\n".join(lines) if lines else _NO_SEGMENTS
     sections = [
         f"## 要約\n\n{summary}",
         *_context_sections(context),
-        f"## 文字起こし\n\n{transcript}",
+        *_transcript_sections(result, refined),
     ]
     if wav_path is not None:
         sections.append(f"## 音声ファイル\n\n{wav_path}")
-    note = _quality_note(result, send_warning)
+    note = None if refined is not None else _quality_note(result, send_warning)
     if note is not None:
         sections.insert(0, note)
     return "\n\n".join(sections) + "\n"

@@ -6,8 +6,11 @@ frontmatter は Obsidian の規約に準拠しているが、他の Markdown ベ
 そのまま利用できる。
 """
 
+import contextlib
 import json
+import os
 import re
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
@@ -112,17 +115,72 @@ def save_live_note(
     """
     save_folder = Path(save_folder)
     now = datetime.now()
-    content = f"""---
+    content = _live_note_content(now, body, tuple(participants), refined=False)
+    try:
+        save_folder.mkdir(parents=True, exist_ok=True)
+        return _write_new_file(save_folder, _live_note_base(audio_file, now), content)
+    except Exception as e:
+        raise RuntimeError(f"保存エラー: {e}") from e
+
+
+def _live_note_content(
+    now: datetime, body: str, participants: tuple[str, ...], *, refined: bool
+) -> str:
+    """ライブノートの frontmatter + 本文。refined なら tags に refined を足す"""
+    refined_tag = "  - refined\n" if refined else ""
+    return f"""---
 created: {now.isoformat()}
 type: live-transcription
 tags:
   - recording
   - live
-{_participants_yaml(tuple(participants))}---
+{refined_tag}{_participants_yaml(participants)}---
 {body}
 """
+
+
+def _replace_atomically(path: Path, content: str) -> None:
+    """同じフォルダの一時ファイルに書いて fsync し、os.replace で置き換える(元の権限を保つ)"""
+    mode = path.stat().st_mode & 0o777
+    # .md 以外の名前にして、ノートアプリが書き込み途中の一時ファイルを拾わないようにする
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.stem}.", suffix=".tmp", dir=path.parent)
     try:
-        save_folder.mkdir(parents=True, exist_ok=True)
-        return _write_new_file(save_folder, _live_note_base(audio_file, now), content)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp_name, mode)
+        os.replace(tmp_name, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_name)
+        raise
+
+
+def overwrite_live_note(
+    path: Path,
+    body: str,
+    participants: tuple[str, ...] = (),
+    refined: bool = False,
+) -> Path:
+    """保存済みのライブノートを原子的に上書きする(途中で失敗しても元のノートは残る)
+
+    Args:
+        path: save_live_note が返したノートのパス(存在しなければ上書きしない)
+        body: 新しい本文（frontmatter を除く Markdown）
+        participants: 参加者名(save_live_note と同じく frontmatter に書く)
+        refined: 高精度の再文字起こし結果を含むなら True(tags に refined を足す)
+
+    Returns:
+        上書きしたファイルのパス
+
+    Raises:
+        RuntimeError: 保存失敗時(対象が無い場合を含む)
+    """
+    path = Path(path)
+    content = _live_note_content(datetime.now(), body, tuple(participants), refined=refined)
+    try:
+        _replace_atomically(path, content)
+        return path
     except Exception as e:
         raise RuntimeError(f"保存エラー: {e}") from e

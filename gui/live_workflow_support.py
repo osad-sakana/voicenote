@@ -21,6 +21,7 @@ from live.bootstrap import BackendCheck
 from live.context import LiveContext
 from live.level_meter import ChunkSink, InputLevelAssessment, LevelMeter
 from live.model_fetch import ProgressCallback, RepoSpec
+from live.refine import format_refine_progress  # noqa: F401 (GUI 向けに再エクスポート)
 from live.session import LiveSession
 from live.session_models import LiveSettings
 from note_writer import save_live_note
@@ -40,6 +41,7 @@ BANNER_OLLAMA = "ollama"
 BANNER_VAD_FALLBACK = "vad_fallback"
 BANNER_EXTERNAL_SEND = "external_send"
 BANNER_LOW_INPUT = "low_input"
+BANNER_REFINE = "refine"  # 停止後の高精度再文字起こしの進捗
 
 
 def validate_live_start(
@@ -226,6 +228,23 @@ class SerializedEngine:
     def transcribe(self, samples, language, prompt=None):
         with self._lock:
             return self._inner.transcribe(samples, language, prompt=prompt)
+
+    @property
+    def active_engine_name(self) -> str | None:
+        """内側のエンジンが報告する実際のエンジン名(無ければ None)"""
+        name = getattr(self._inner, "active_engine_name", None)
+        return name if isinstance(name, str) else None
+
+    def unload(self) -> None:
+        """ロック下でモデルを解放する"""
+        with self._lock:
+            self.unload_locked()
+
+    def unload_locked(self) -> None:
+        """呼び出し側が既にロックを持っているときの解放(Lock は再入不可のため)"""
+        unload = getattr(self._inner, "unload", None)
+        if callable(unload):
+            unload()
 
 
 class DownloadProgress:

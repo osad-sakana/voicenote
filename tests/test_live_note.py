@@ -100,3 +100,41 @@ class TestRenderLiveNotePrivacy:
     def test_clean_result_has_no_warning_even_with_openai(self):
         body = render_live_note(_result(), send_warning=external_send_warning("openai", "llm"))
         assert "OpenAI" not in body
+
+
+class TestRefinedSections:
+    def _refined(self):
+        from live.session_models import RefinedTranscript
+
+        return RefinedTranscript(
+            segments=(
+                LiveSegment(0, 0.5, 2.0, "高精度の一文目"),
+                LiveSegment(1, 61.0, 63.0, "高精度の二文目"),
+            ),
+            model="large-v3",
+        )
+
+    def test_without_refined_is_unchanged(self):
+        assert render_live_note(_result(), refined=None) == render_live_note(_result())
+
+    def test_refined_section_comes_before_live_section(self):
+        note = render_live_note(_result(), Path("/tmp/a.wav"), refined=self._refined())
+        refined_at = note.index("## 文字起こし（高精度: large-v3）")
+        live_at = note.index("## ライブ文字起こし（速報）")
+        assert note.index("## 要約") < refined_at < live_at < note.index("## 音声ファイル")
+        assert "- [00:00] 高精度の一文目" in note
+        assert "- [01:01] 高精度の二文目" in note
+        assert "- [01:05] 本題です" in note[live_at:]
+        assert "\n## 文字起こし\n" not in note
+
+    def test_empty_refined_shows_placeholder(self):
+        from live.session_models import RefinedTranscript
+
+        note = render_live_note(_result(), refined=RefinedTranscript((), "large-v3"))
+        refined_at = note.index("## 文字起こし（高精度: large-v3）")
+        assert "（文字起こし結果なし）" in note[refined_at:]
+
+    def test_refined_omits_live_quality_warning(self):
+        # 高精度版は WAV 全体から作るので、ライブの欠落の注意書き(--file の案内)は出さない
+        note = render_live_note(_result(dropped_chunks=5, complete=False), refined=self._refined())
+        assert "欠落" not in note
