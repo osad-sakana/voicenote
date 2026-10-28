@@ -51,12 +51,20 @@ class BackgroundModelFetch:
         on_failed: Callable[[str], None] = _noop,
         on_done: Callable[[], None] = _noop,
     ) -> FetchStart:
-        """未取得なら取得を始める。取得済みは cached、取得中は running、名前が不正なら invalid"""
+        """未取得なら取得を始める。取得済みは cached、取得中は running、確認できなければ invalid
+
+        どんな例外も外へ出さない(呼び出し側は録音中なので、失敗で録音を止めない)。
+        通知・ログは例外の型名だけにする(ホームディレクトリのパスなどを出さない)。
+        """
         try:
-            repo = fetcher.resolve_repo(engine, model)
-        except ValueError:
-            _safe(on_failed, f"高精度モデル {model} の名前を解決できません")
+            return self._start(fetcher, engine, model, on_failed, on_done)
+        except Exception as e:
+            _logger.warning("高精度モデルを確認できません: %s", type(e).__name__)
+            _safe(on_failed, f"高精度モデル {model} を確認できません（{type(e).__name__}）")
             return "invalid"
+
+    def _start(self, fetcher, engine, model, on_failed, on_done) -> FetchStart:
+        repo = fetcher.resolve_repo(engine, model)
         if repo is None or fetcher.is_cached(repo):
             return "cached"
         with self._lock:
@@ -69,16 +77,18 @@ class BackgroundModelFetch:
                 daemon=True,
                 name="refine-model-fetch",
             )
-            self._threads[repo.repo_id] = thread
-            # 登録と開始を同じロック下で行う(開始前の is_alive は False のため)
+            # 登録と開始を同じロック下で行う(開始前の is_alive は False のため)。
+            # 開始に失敗したら登録しない(次回の開始を妨げない)
             thread.start()
+            self._threads[repo.repo_id] = thread
         return "started"
 
     def is_fetching(self, fetcher, engine: str, model: str) -> bool:
-        """そのモデルの取得スレッドが動いているか"""
+        """そのモデルの取得スレッドが動いているか(確認できなければ False)"""
         try:
             repo = fetcher.resolve_repo(engine, model)
-        except ValueError:
+        except Exception as e:
+            _logger.warning("高精度モデルを確認できません: %s", type(e).__name__)
             return False
         if repo is None:
             return False

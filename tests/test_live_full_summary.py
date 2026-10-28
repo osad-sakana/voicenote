@@ -295,3 +295,28 @@ class TestSummarizeFull:
     def test_invalid_chunk_size(self):
         with pytest.raises(ValueError):
             _run(FakeBackend(), ["発言"], max_chunk_chars=0)
+
+
+def test_skips_when_estimate_exceeds_max_timeout(caplog):
+    """必要時間の見積もり(呼び出し回数 × 1回あたり)が上限を超えるなら最初から試さない"""
+    from live.full_summary import FULL_SUMMARY_MAX_TIMEOUT_SEC, FULL_SUMMARY_SEC_PER_CALL
+
+    calls_needed = int(FULL_SUMMARY_MAX_TIMEOUT_SEC // FULL_SUMMARY_SEC_PER_CALL) + 1
+    texts = ["あ" * 8] * calls_needed  # 1塊1件 → 塊数 + 統合 が上限を超える
+    backend = FakeBackend()
+    with caplog.at_level("WARNING", logger="voicenote"):
+        assert _run(backend, texts, max_chunk_chars=10) is None
+    assert backend.calls == []
+    assert any("長すぎる" in r.getMessage() for r in caplog.records)
+    assert not any("あ" * 8 in r.getMessage() for r in caplog.records)
+
+
+def test_runs_when_estimate_is_within_max_timeout():
+    from live.full_summary import FULL_SUMMARY_MAX_TIMEOUT_SEC, FULL_SUMMARY_SEC_PER_CALL
+
+    chunks = (
+        int(FULL_SUMMARY_MAX_TIMEOUT_SEC // FULL_SUMMARY_SEC_PER_CALL) - 1
+    )  # 統合込みで上限ちょうど
+    replies = (GOOD_SUMMARY,) * chunks + (MERGED_SUMMARY,)
+    backend = FakeBackend(replies=replies)
+    assert _run(backend, ["あ" * 8] * chunks, max_chunk_chars=10) == MERGED_SUMMARY

@@ -145,11 +145,22 @@ def summarize_full(
 ) -> str | None:
     """全セグメントの文字起こしから要約を作る。作れなければ None。
 
+    必要時間の見積もり(塊数 + 統合1回 × FULL_SUMMARY_SEC_PER_CALL)が
+    FULL_SUMMARY_MAX_TIMEOUT_SEC を超えるなら呼び出さずに None を返す。
     各 LLM 呼び出しの前に deadline（clock 基準の絶対時刻）と cancel を確認し、
     超過・キャンセル・例外・不採用の応答が1つでもあれば None を返す。
     1塊に収まれば呼び出しは1回だけ。複数塊なら塊ごとに要約してから統合する。
     """
     chunks = split_chunks(texts, max_chunk_chars)
+    if _estimated_sec(len(chunks)) > FULL_SUMMARY_MAX_TIMEOUT_SEC:
+        # 上限内に終わらない見込みなら最初から試さない(本文は出さず、塊数だけを残す)
+        _logger.warning(
+            "文字起こしが長すぎるため全文要約を省きます（%d 塊・見込み %.0f 秒 > 上限 %.0f 秒）",
+            len(chunks),
+            _estimated_sec(len(chunks)),
+            FULL_SUMMARY_MAX_TIMEOUT_SEC,
+        )
+        return None
     partials: list[str] = []
     for chunk in chunks:
         if _should_stop(deadline, clock, cancel):
@@ -165,10 +176,15 @@ def summarize_full(
     return _ask(backend, build_merge_messages(partials, context))
 
 
+def _estimated_sec(chunk_count: int) -> float:
+    """必要時間の見積もり(LLM の呼び出し回数 = 塊数 + 統合1回)"""
+    return FULL_SUMMARY_SEC_PER_CALL * (chunk_count + 1)
+
+
 def full_summary_timeout(texts: Sequence[str], max_chunk_chars: int = FULL_CHUNK_CHARS) -> float:
-    """summarize_full に与える上限時間(秒)。LLM の呼び出し回数(塊数 + 統合1回)に比例させる"""
-    calls = len(split_chunks(texts, max_chunk_chars)) + 1
-    return min(
-        FULL_SUMMARY_MAX_TIMEOUT_SEC,
-        max(FULL_SUMMARY_MIN_TIMEOUT_SEC, FULL_SUMMARY_SEC_PER_CALL * calls),
-    )
+    """summarize_full に与える上限時間(秒)。LLM の呼び出し回数(塊数 + 統合1回)に比例させる
+
+    見積もりが上限を超える量は summarize_full が最初から試さない。
+    """
+    estimate = _estimated_sec(len(split_chunks(texts, max_chunk_chars)))
+    return min(FULL_SUMMARY_MAX_TIMEOUT_SEC, max(FULL_SUMMARY_MIN_TIMEOUT_SEC, estimate))

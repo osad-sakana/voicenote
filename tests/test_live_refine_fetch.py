@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import threading
 
+import pytest
+
 from live.model_fetch import RepoSpec
 from live.refine_fetch import BackgroundModelFetch
 
@@ -135,12 +137,87 @@ def test_callback_errors_do_not_escape():
 def test_default_factory_uses_real_daemon_thread():
     gate = threading.Event()
     fetcher = FakeFetcher(gate=gate)
-    bg = BackgroundModelFetch()
+    created: list[threading.Thread] = []
+
+    def factory(**kwargs):
+        thread = threading.Thread(**kwargs)
+        created.append(thread)
+        return thread
+
+    bg = BackgroundModelFetch(thread_factory=factory)
     assert bg.start(fetcher, "mlx", "large-v3") == "started"
+    assert created[0].daemon is True
     assert bg.is_fetching(fetcher, "mlx", "large-v3") is True
     gate.set()
-    for _ in range(200):
-        if not bg.is_fetching(fetcher, "mlx", "large-v3"):
-            break
-        threading.Event().wait(0.01)
+    created[0].join(timeout=5.0)
+    assert not created[0].is_alive()
     assert fetcher.fetched == ["repo/large-v3"]
+    assert bg.is_fetching(fetcher, "mlx", "large-v3") is False
+
+
+class _RaisingResolve(FakeFetcher):
+    def __init__(self, error):
+        super().__init__()
+        self.resolve_error = error
+
+    def resolve_repo(self, engine, model):
+        raise self.resolve_error
+
+
+@pytest.mark.parametrize(
+    "error",
+    [RuntimeError("Could not determine home directory."), PermissionError("secret /Users/x")],
+    ids=["runtime", "permission"],
+)
+def test_start_resolve_error_is_invalid_with_type_name_only(error):
+    created: list = []
+    failures: list[str] = []
+    bg = BackgroundModelFetch(thread_factory=_deferred_factory(created))
+    status = bg.start(_RaisingResolve(error), "mlx", "large-v3", on_failed=failures.append)
+    assert status == "invalid"
+    assert created == []
+    assert failures == [f"高精度モデル large-v3 を確認できません（{type(error).__name__}）"]
+
+
+@pytest.mark.parametrize("error", [RuntimeError("x"), PermissionError("x")])
+def test_is_fetching_resolve_error_is_false(error):
+    bg = BackgroundModelFetch(thread_factory=_deferred_factory([]))
+    assert bg.is_fetching(_RaisingResolve(error), "mlx", "large-v3") is False
+
+
+def test_is_cached_error_is_invalid():
+    class _RaisingCached(FakeFetcher):
+        def is_cached(self, repo):
+            raise OSError("disk")
+
+    failures: list[str] = []
+    bg = BackgroundModelFetch(thread_factory=_deferred_factory([]))
+    assert bg.start(_RaisingCached(), "mlx", "large-v3", on_failed=failures.append) == "invalid"
+    assert "OSError" in failures[0]
+
+
+def test_thread_start_failure_is_invalid_and_can_retry():
+    failures: list[str] = []
+    attempts = {"n": 0}
+
+    class _FailingStart(DeferredThread):
+        def start(self):
+            attempts["n"] += 1
+            if attempts["n"] == 1:
+                raise RuntimeError("can't start new thread")
+            super().start()
+
+    bg = BackgroundModelFetch(thread_factory=lambda **kw: _FailingStart(**kw))
+    fetcher = FakeFetcher()
+    assert bg.start(fetcher, "mlx", "large-v3", on_failed=failures.append) == "invalid"
+    assert "RuntimeError" in failures[0]
+    assert bg.is_fetching(fetcher, "mlx", "large-v3") is False
+    assert bg.start(fetcher, "mlx", "large-v3") == "started"
+
+
+def test_thread_factory_failure_is_invalid():
+    def factory(**_kwargs):
+        raise RuntimeError("no threads")
+
+    bg = BackgroundModelFetch(thread_factory=factory)
+    assert bg.start(FakeFetcher(), "mlx", "large-v3") == "invalid"

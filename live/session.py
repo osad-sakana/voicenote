@@ -27,7 +27,7 @@ from live.asr_hint import HINT_MIN_SEGMENT_SEC, build_asr_hint, is_hint_echo
 from live.chunk_queue import BoundedChunkQueue
 from live.context import LiveContext
 from live.framer import Framer
-from live.full_summary import summarize_full
+from live.full_summary import full_summary_timeout, summarize_full
 from live.hallucination import is_hallucination
 from live.segment_queue import DropOldestQueue
 from live.segmenter import Segment, Segmenter
@@ -100,6 +100,7 @@ class LiveSession:
         self._segmenter_done = threading.Event()
         self._abort_asr = threading.Event()  # stop の timeout 超過時に asr を打ち切る
         self._summary_stop = threading.Event()
+        self._abort_full_summary = threading.Event()  # 時間切れの全文要約を打ち切る
         self._threads: dict[str, threading.Thread] = {}
         self._result: LiveResult | None = None
 
@@ -174,18 +175,20 @@ class LiveSession:
         else:
             self._pending_gap_samples = gap + len(chunk)
 
-    def stop(self, timeout: float = 30.0, rebuild_summary: bool = True) -> LiveResult:
+    def stop(self, timeout: float = 30.0, summary_timeout: float | None = None) -> LiveResult:
         """
-        セッションを終了して結果を返す。全体で最大 timeout 秒(実時間)で戻る。
+        セッションを終了して結果を返す。
 
         1. 新規チャンクの受付を止める
         2. 残りのチャンクを区間化し、開いている区間を flush する
-        3. 区間キューを文字起こしし切る(ドレイン)
+        3. 区間キューを文字起こしし切る(ドレイン。最大 timeout 秒)
         4. 全文から最終要約を作り直す。失敗・時間切れならローリング要約を1回試み、
-           それも駄目なら直前の要約を使う
+           それも駄目なら直前の要約を使う(最大 summary_timeout 秒)
 
-        rebuild_summary=False なら 4 の全文要約を省き、ローリング要約だけで締める
-        (停止後に高精度の再文字起こしを予定し、LLM とメモリを奪い合わないようにする場合)。
+        summary_timeout=None なら文字起こしの量に比例させる(full_summary_timeout: LLM の
+        呼び出し回数 × 1回あたり、下限・上限あり)。録音が長いほど長く待つので、GUI は
+        「中断して保存」、CLI は Ctrl+C で待ちを打ち切れる。時間切れの全文要約には専用の
+        cancel を立て、以降の LLM 呼び出しをさせない(送信中の1回は LLM 側の timeout まで続きうる)。
         """
         if self._result is not None:
             return self._result
@@ -194,7 +197,7 @@ class LiveSession:
         if not self._threads:
             self._segmenter_done.set()
         complete = self._drain(deadline)
-        final_summary = self._finish_summary(deadline, rebuild_summary)
+        final_summary = self._finish_summary(summary_timeout)
         with self._lock:
             self._result = LiveResult(
                 segments=self._results,
@@ -231,16 +234,25 @@ class LiveSession:
             self._warn("時間内に文字起こしできなかった区間があります（WAVファイルは保存済みです）")
         return done
 
-    def _finish_summary(self, deadline: float, rebuild_summary: bool = True) -> str:
-        """周期要約を止め、最終要約を timeout 付きで作る(全文要約 → ローリング要約の順に試す)"""
+    def _summary_deadline(self, summary_timeout: float | None) -> float:
+        """最終要約の期限。未指定なら文字起こしの量(LLM の呼び出し回数)に比例させる"""
+        if summary_timeout is None:
+            with self._lock:
+                texts = tuple(seg.text for seg in self._results)
+            summary_timeout = full_summary_timeout(texts)
+        return time.monotonic() + max(0.0, summary_timeout)
+
+    def _finish_summary(self, summary_timeout: float | None) -> str:
+        """周期要約を止め、最終要約を期限付きで作る(全文要約 → ローリング要約の順に試す)"""
         summarizer = self._summarizer
         if summarizer is None:
             return ""
+        deadline = self._summary_deadline(summary_timeout)
         self._summary_stop.set()
         if not self._join("live-summary", deadline):
             return summarizer.summary
         before = summarizer.summary
-        full = self._summarize_full(deadline) if rebuild_summary else None
+        full = self._summarize_full(deadline)
         if full:
             if full != before:
                 _safe_call(self._callbacks.on_summary, full)
@@ -265,7 +277,7 @@ class LiveSession:
                     context,
                     deadline=full_deadline,
                     clock=time.monotonic,
-                    cancel=self._abort_asr,
+                    cancel=_AnySet(self._abort_asr, self._abort_full_summary),
                 )
             ),
             name="live-full-summary",
@@ -274,6 +286,7 @@ class LiveSession:
         worker.start()
         worker.join(max(0.0, full_deadline - time.monotonic()))
         if worker.is_alive() or not outcome:
+            self._abort_full_summary.set()  # 残りの塊・統合の呼び出しをさせない
             self._warn("全文からの最終要約が時間内に終わらなかったため、直前の要約を使います")
             return None
         return outcome[0]
@@ -415,6 +428,16 @@ class LiveSession:
         while not self._summary_stop.wait(self._settings.summary_poll_sec):
             if summarizer.maybe_run(backlog_sec=self.backlog_sec):
                 _safe_call(self._callbacks.on_summary, summarizer.summary)
+
+
+class _AnySet:
+    """いずれかの Event が立っていれば is_set() が True(summarize_full の cancel 用)"""
+
+    def __init__(self, *events: threading.Event):
+        self._events = events
+
+    def is_set(self) -> bool:
+        return any(event.is_set() for event in self._events)
 
 
 def _validate_context(context) -> None:

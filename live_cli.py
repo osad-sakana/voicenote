@@ -13,6 +13,7 @@ large-v3 で文字起こしし直し、要約も作り直して同じノート�
 - ライブ側がハング・遅延しても WAV は既にディスク上に確定している
 """
 
+import logging
 import sys
 import threading
 import time
@@ -59,6 +60,7 @@ from note_writer import overwrite_live_note, save_live_note
 from recorder import record_audio
 
 console = Console()
+_logger = logging.getLogger("voicenote")
 
 SESSION_STOP_TIMEOUT_SEC = 120.0
 ERROR_STOP_TIMEOUT_SEC = 2.0
@@ -218,7 +220,7 @@ def run_live(config: VoiceNoteConfig, device: str | None, dest_dir: Path) -> Non
             view,
             device,
             dest_dir,
-            on_recording=lambda: _start_refine_fetch(settings, fetch),
+            on_recording=lambda: _start_refine_check(settings, fetch),
         )
     except (ValueError, RuntimeError) as e:
         session.stop(timeout=ERROR_STOP_TIMEOUT_SEC)
@@ -241,7 +243,9 @@ def _drain(session: LiveSession) -> LiveResult | None:
         "[cyan]残りの区間を文字起こしし、最終要約を作成しています...（Ctrl+C で中断）[/cyan]"
     )
     try:
-        # 再文字起こしの有無に関係なく全文要約まで作る(再文字起こしより前に終わるのでメモリは競合しない)
+        # 再文字起こしの有無に関係なく全文要約まで作る。要約は stop の中で終わるか打ち切られる
+        # (時間切れなら専用の cancel で以降の LLM 呼び出しを止める。送信中の1回だけは LLM 側の
+        # timeout まで続きうる)。上限は文字起こしの量に比例し、待ちは Ctrl+C で打ち切れる
         return session.stop(timeout=SESSION_STOP_TIMEOUT_SEC)
     except KeyboardInterrupt:
         # record_audio は戻る前に SIGINT ハンドラを復元するため、ここでの Ctrl+C は
@@ -278,12 +282,35 @@ class _RefineJob:
 
 
 def _refine_model_cached(settings: LiveSettings) -> bool:
-    """高精度モデルがローカルにあるか(リポジトリ名が解決できなければ False)"""
+    """高精度モデルがローカルにあるか(確認できなければ False。型名だけログに残す)"""
     try:
         repo = model_fetch.resolve_repo(REFINE_ENGINE, settings.refine_model)
-    except ValueError:
+        return repo is None or model_fetch.is_cached(repo)
+    except Exception as e:
+        _logger.warning("高精度モデルを確認できません: %s", type(e).__name__)
         return False
-    return repo is None or model_fetch.is_cached(repo)
+
+
+def _start_refine_check(settings: LiveSettings, fetch: BackgroundModelFetch) -> None:
+    """録音開始時に呼ぶ。取得要否の確認(ディスク参照)ごと daemon スレッドへ回し、録音を待たせない
+
+    record_audio の on_start から呼ばれるため、ここでは例外を一切外へ出さない
+    (出すと録音エラー扱いで終了してしまう)。
+    """
+    if not settings.refine_enabled or settings.engine != REFINE_ENGINE:
+        return
+    try:
+        _fetch_thread_factory(
+            target=_start_refine_fetch,
+            args=(settings, fetch),
+            daemon=True,
+            name="refine-model-check",
+        ).start()
+    except Exception as e:
+        _logger.warning("高精度モデルの確認を開始できません: %s", type(e).__name__)
+        _warn(
+            f"高精度モデルの確認を開始できません（{type(e).__name__}）。再文字起こしなしで続行します"
+        )
 
 
 def _start_refine_fetch(settings: LiveSettings, fetch: BackgroundModelFetch) -> None:
@@ -411,12 +438,15 @@ def _refined_summary(job: _RefineJob, refined: RefinedTranscript, fallback: str)
 
 
 def _refine_phase(job: _RefineJob, result: LiveResult, note_path: Path) -> bool:
-    """停止後の再文字起こし全体。途中の Ctrl+C は速報版を残して正常に終える"""
+    """停止後の再文字起こし全体。Ctrl+C・想定外の例外は速報版を残して正常に終える"""
     try:
         return _plan_refine(job) and _refine_and_overwrite(job, result, note_path)
     except KeyboardInterrupt:
         _warn("高精度の再文字起こしを中断しました。速報版のノートを残します")
-        return False
+    except Exception as e:
+        _logger.error("高精度の再文字起こしで未捕捉の例外: %s", type(e).__name__)
+        _warn(f"高精度の再文字起こしに失敗しました（{type(e).__name__}）。速報版のノートを残します")
+    return False
 
 
 def _refine_and_overwrite(job: _RefineJob, result: LiveResult, note_path: Path) -> bool:

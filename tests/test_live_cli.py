@@ -559,17 +559,17 @@ def refine_env(env, monkeypatch):
     fetch_threads: list = []
 
     class SyncThread:
-        """取得スレッドを start() で同期実行する(defer=True なら走らせず取得中のまま)"""
+        """確認・取得スレッドを start() で同期実行する(defer=True なら取得だけ走らせず取得中のまま)"""
 
         defer = False
 
         def __init__(self, target, args=(), daemon=None, name=None, **kwargs):
-            self.target, self.args, self.daemon = target, args, daemon
+            self.target, self.args, self.daemon, self.name = target, args, daemon, name
             self.alive = False
             fetch_threads.append(self)
 
         def start(self):
-            if SyncThread.defer:
+            if SyncThread.defer and self.name == "refine-model-fetch":
                 self.alive = True
                 return
             self.target(*self.args)
@@ -706,7 +706,9 @@ class TestRefine:
         events = refine_env.events
         assert events.index("record_audio") < events.index("fetch") < events.index("on_saved")
         assert refine_env.fetch.fetched == ["repo/mlx/large-v3"]
-        assert refine_env.fetch_threads[0].daemon is True
+        names = [t.name for t in refine_env.fetch_threads]
+        assert names == ["refine-model-check", "refine-model-fetch"]
+        assert all(t.daemon is True for t in refine_env.fetch_threads)
         assert "refine_wav" in events
 
     def test_fetch_still_running_at_stop_skips_with_file_hint(self, refine_env):
@@ -730,7 +732,33 @@ class TestRefine:
 
     def test_cached_model_starts_no_fetch_thread(self, refine_env):
         live_cli.run_live(refine_env.config, None, refine_env.dest)
-        assert refine_env.fetch_threads == []
+        assert [t.name for t in refine_env.fetch_threads] == ["refine-model-check"]
+
+    @pytest.mark.parametrize(
+        "error",
+        [RuntimeError("Could not determine home directory."), PermissionError("secret /Users/x")],
+        ids=["runtime", "permission"],
+    )
+    def test_fetch_check_error_does_not_break_recording(self, refine_env, monkeypatch, error):
+        def raising(engine, model):
+            raise error
+
+        monkeypatch.setattr(refine_env.fetch, "resolve_repo", raising)
+        live_cli.run_live(refine_env.config, None, refine_env.dest)  # 例外を外へ漏らさない
+        assert "save_live_note" in refine_env.events
+        assert "refine_wav" not in refine_env.events
+        text = refine_env.out.getvalue()
+        assert f"確認できません（{type(error).__name__}）" in text
+        assert "secret" not in text
+
+    def test_check_thread_start_failure_does_not_break_recording(self, refine_env, monkeypatch):
+        def no_threads(**_kwargs):
+            raise RuntimeError("can't start new thread")
+
+        monkeypatch.setattr(live_cli, "_fetch_thread_factory", no_threads)
+        refine_env.fetch.cached = False
+        live_cli.run_live(refine_env.config, None, refine_env.dest)
+        assert "save_live_note" in refine_env.events
 
     def test_ctrl_c_while_waiting_for_asr_keeps_fast_note(self, refine_env):
         def interrupted(timeout):

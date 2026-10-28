@@ -100,7 +100,9 @@ __all__ = [
 
 _logger = logging.getLogger("voicenote")
 
-SESSION_STOP_TIMEOUT_SEC = 120.0  # ドレイン(残り区間の文字起こし + 最終要約)の上限
+SESSION_STOP_TIMEOUT_SEC = (
+    120.0  # ドレイン(残り区間の文字起こし)の上限。最終要約は量に比例した別上限
+)
 ERROR_STOP_TIMEOUT_SEC = 2.0  # 失敗・取り消し時にセッションを解放する際の上限
 SHUTDOWN_FINALIZE_TIMEOUT_SEC = 1.0  # ウィンドウを閉じる時の WAV 確定の上限
 SHUTDOWN_JOIN_SEC = 1.0  # ウィンドウを閉じる時にストリーム停止を待つ猶予
@@ -350,6 +352,15 @@ class LiveWorkflow(RefineLifecycle):
             self._write_partial_note(run, state, session, wav)
         self._finish_run(run)
 
+    def _guarded(self, what: str, fn: Callable, *args):
+        """fn を呼んで結果を返す。例外は型名だけをログに残して None を返す(録音・保存を続ける)"""
+        try:
+            return fn(*args)
+        except Exception as e:
+            _logger.error("%s: %s", what, type(e).__name__)
+            self._safe(self._callbacks.on_log, f"{what}（{type(e).__name__}）")
+            return None
+
     def _safe(self, fn: Callable, *args) -> None:
         """コールバックを呼ぶ。UI 側の例外でワーカーを止めない"""
         try:
@@ -537,7 +548,9 @@ class LiveWorkflow(RefineLifecycle):
         sink = tee(meter.feed, session.feed)
         self._start_recorder(run, self._deps.recorder_factory(run.device_id, run.dest, sink))
         self._safe(self._callbacks.on_recording_started)
-        self._start_refine_fetch(settings)  # 録音開始後に取得する(録音の開始を待たせない)
+        # 録音開始後に取得する(録音の開始を待たせない)。ここで例外を出すと録音中のマイクを
+        # 開いたまま準備失敗扱いになるため、取得の失敗は必ずここで止める
+        self._guarded("高精度モデルの取得を開始できません", self._start_refine_fetch, settings)
         self._safe(self._callbacks.on_log, f"ライブ録音開始 (デバイス: {run.device_label})")
 
     @staticmethod
@@ -688,7 +701,7 @@ class LiveWorkflow(RefineLifecycle):
         再文字起こしを行うかは、ドレイン後(実際に動いたエンジンが確定した後)に決める。
         """
         try:
-            # 再文字起こしの有無に関係なく全文要約まで作る(再文字起こしより前に終わる)
+            # 全文要約まで作る(stop の中で終わるか打ち切る。上限は量に比例、「中断して保存」で放棄可)
             result: LiveResult | None = session.stop(timeout=self._session_stop_timeout)
         except Exception:
             _logger.error("session.stop で例外:\n%s", traceback.format_exc())
@@ -702,7 +715,9 @@ class LiveWorkflow(RefineLifecycle):
             state = self._state
         if result is None:
             result = to_live_result(state, dropped_chunks=_dropped_chunks(session), complete=False)
-        self._save_note(run, result, wav, refine=self._plan_refine())
+        # 判定に失敗しても SAVING に残さず、速報版の保存へ進む
+        refine = self._guarded("再文字起こしの判定に失敗しました", self._plan_refine) is True
+        self._save_note(run, result, wav, refine=refine)
 
     def _render_and_save(self, run: _Run, result: LiveResult, wav: Path) -> Path:
         config = run.config

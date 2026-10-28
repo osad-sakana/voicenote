@@ -99,12 +99,6 @@ class TestRefineFlow:
         assert "高精度の要約" in body
         assert h.summaries == [("高精度の発話",)]
 
-    def test_session_stop_keeps_full_summary_even_when_refine_planned(self, tmp_path):
-        h = _harness(tmp_path)
-        h.start()
-        h.wf.stop()
-        assert h.sessions[0].rebuild_summary == [True]
-
     def test_waits_for_asr_idle_before_refine(self, tmp_path):
         h = _harness(tmp_path)
         h.start()
@@ -187,7 +181,6 @@ class TestRefineSkips:
         h.wf.stop()
         assert LivePhase.REFINING not in _phases(h.spy.states)
         assert h.refine.calls == []
-        assert h.sessions[0].rebuild_summary == [True]
         assert h.spy.done == [(h.wav, _fast_note(h))]
 
     def test_faster_whisper_skips_with_hint(self, tmp_path):
@@ -195,7 +188,6 @@ class TestRefineSkips:
         h.start()
         h.wf.stop()
         assert h.refine.calls == []
-        assert h.sessions[0].rebuild_summary == [True]
         assert any("スキップ" in m and "高精度で文字起こし" in m for m in h.spy.logs)
         assert h.log.count("on_done") == 1
 
@@ -441,3 +433,66 @@ def test_unexpected_refine_result_still_finishes_once(tmp_path):
     assert h.overwrites == []
     assert h.wf._engine_lock.acquire(timeout=0.01)
     h.wf._engine_lock.release()
+
+
+# ──────────────── レビュー指摘(2回目): 取得確認の例外でマイクを開いたまま戻らない ────────────────
+
+
+class _RaisingFetcher(FakeFetcher):
+    def __init__(self, error):
+        super().__init__()
+        self.error_to_raise = error
+
+    def resolve_repo(self, engine, model):
+        if model == "large-v3":
+            raise self.error_to_raise
+        return super().resolve_repo(engine, model)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [RuntimeError("Could not determine home directory."), PermissionError("secret /Users/x")],
+    ids=["runtime", "permission"],
+)
+def test_fetch_check_error_keeps_recording_and_stop_saves_fast_note(tmp_path, error):
+    h = _harness(tmp_path, fetcher=_RaisingFetcher(error))
+    h.start()
+    assert h.state.phase is LivePhase.RECORDING
+    assert h.recorders[0].started is True
+    assert h.spy.errors == []
+    h.log.clear()
+    h.wf.stop()
+    assert h.log[:4] == ["finalize", "on_wav_saved", "stop_with_timeout", "session.stop"]
+    assert "save" in h.log and h.log[-1] == "on_done"
+    assert h.state.phase is LivePhase.IDLE
+    assert h.spy.done == [(h.wav, _fast_note(h))]
+    assert h.refine.calls == []
+    assert not any("secret" in m for m in h.spy.logs)
+    assert any(f"確認できません（{type(error).__name__}）" in m for m in h.spy.logs)
+
+
+def test_start_refine_fetch_unexpected_error_is_contained(tmp_path):
+    h = _harness(tmp_path)
+
+    def broken(*_a, **_k):
+        raise RuntimeError("unexpected")
+
+    h.wf._refine_fetch.start = broken
+    h.start()
+    assert h.state.phase is LivePhase.RECORDING
+    h.wf.stop()
+    assert h.spy.done == [(h.wav, _fast_note(h))]
+
+
+def test_plan_refine_error_still_saves_fast_note(tmp_path):
+    h = _harness(tmp_path)
+    h.start()
+
+    def broken():
+        raise RuntimeError("plan failed")
+
+    h.wf._plan_refine = broken
+    h.wf.stop()
+    assert h.state.phase is LivePhase.IDLE
+    assert h.spy.done == [(h.wav, _fast_note(h))]
+    assert h.refine.calls == []

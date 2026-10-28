@@ -294,7 +294,6 @@ class FakeSession:
         self.fed: list[np.ndarray] = []
         self.started = False
         self.stop_timeouts: list[float] = []
-        self.rebuild_summary: list[bool] = []
         self.backlog_sec = 1.5
         self.dropped_chunks = 3
         self.asr_idle = True  # wait_asr_idle の戻り値
@@ -314,10 +313,9 @@ class FakeSession:
         self.log.append("session.wait_asr_idle")
         return self.asr_idle
 
-    def stop(self, timeout=30.0, rebuild_summary=True):
+    def stop(self, timeout=30.0):
         self.log.append("session.stop")
         self.stop_timeouts.append(timeout)
-        self.rebuild_summary.append(rebuild_summary)
         if self.fail_stop:
             raise RuntimeError("stop 失敗")
         return self.result
