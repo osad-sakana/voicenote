@@ -4,7 +4,7 @@ import customtkinter as ctk
 from tkinterdnd2 import DND_FILES
 
 from . import theme
-from .constants import MODE_RECORD_TRANSCRIBE, MODES
+from .constants import DEFAULT_MODE, MODES
 from .mode_logic import resize_on_log_toggle, window_spec
 from .segmented import refresh_segment_text
 
@@ -75,7 +75,7 @@ def _build_header(app) -> None:
 
 
 def _build_mode_selector(app) -> None:
-    app._mode_var = ctk.StringVar(value=MODE_RECORD_TRANSCRIBE)
+    app._mode_var = ctk.StringVar(value=DEFAULT_MODE)
     app._mode_selector = ctk.CTkSegmentedButton(
         app,
         values=MODES,

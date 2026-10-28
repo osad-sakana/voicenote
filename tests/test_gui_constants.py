@@ -3,6 +3,7 @@
 import pytest
 
 from gui.constants import (
+    DEFAULT_MODE,
     MODE_LIVE,
     MODE_RECORD_ONLY,
     MODE_RECORD_TRANSCRIBE,
@@ -40,3 +41,9 @@ def test_existing_mode_values_unchanged():
 def test_live_mode_label():
     assert MODE_LIVE == "ライブ"
     assert len(set(MODES)) == len(MODES)
+
+
+def test_default_mode_is_live_and_selectable():
+    # 起動時に選ばれるモードはライブ。選択肢に含まれていること
+    assert DEFAULT_MODE == MODE_LIVE
+    assert DEFAULT_MODE in MODES

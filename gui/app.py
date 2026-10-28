@@ -14,6 +14,7 @@ from recorder import list_devices
 
 from . import theme
 from .constants import (
+    DEFAULT_MODE,
     MODE_LIVE,
     MODE_RECORD_ONLY,
     MODE_RECORD_TRANSCRIBE,
@@ -49,7 +50,7 @@ class App(TkinterDnD.DnDWrapper, ctk.CTk):
         super().__init__()
         self.TkdndVersion = TkinterDnD._require(self)
         self.title("VoiceNote")
-        self._apply_window(window_spec(MODE_RECORD_TRANSCRIBE, log_visible=False))
+        self._apply_window(window_spec(DEFAULT_MODE, log_visible=False))
 
         self._log_file = log_file
         self._config: VoiceNoteConfig = VoiceNoteConfig()
