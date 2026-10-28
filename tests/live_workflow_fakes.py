@@ -109,7 +109,7 @@ class FakeEngine:
             raise Unavailable(f"{self.name} を読み込めません")
         self.loaded = True
 
-    def transcribe(self, samples, language):
+    def transcribe(self, samples, language, prompt=None):
         return f"{self.name}:{language}"
 
 

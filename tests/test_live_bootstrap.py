@@ -177,7 +177,23 @@ class TestFallbackOnLoadEngine:
         engine = FallbackOnLoadEngine(primary, MagicMock, FakeUnavailable, print)
         engine.load()
         assert engine.transcribe("s", "ja") == "p"
-        primary.transcribe.assert_called_once_with("s", "ja")
+        primary.transcribe.assert_called_once_with("s", "ja", prompt=None)
+
+    def test_transcribe_forwards_prompt(self):
+        primary = MagicMock()
+        engine = FallbackOnLoadEngine(primary, MagicMock, FakeUnavailable, print)
+        engine.load()
+        engine.transcribe("s", "ja", prompt="参加者: 田中。")
+        primary.transcribe.assert_called_once_with("s", "ja", prompt="参加者: 田中。")
+
+    def test_transcribe_forwards_prompt_to_fallback(self):
+        primary = MagicMock()
+        primary.load.side_effect = FakeUnavailable("x")
+        fallback = MagicMock()
+        engine = FallbackOnLoadEngine(primary, lambda: fallback, FakeUnavailable, lambda _m: None)
+        engine.load()
+        engine.transcribe("s", None, prompt="用語: 予算。")
+        fallback.transcribe.assert_called_once_with("s", None, prompt="用語: 予算。")
 
     def test_fallback_load_error_propagates(self):
         primary = MagicMock()

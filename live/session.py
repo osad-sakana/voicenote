@@ -5,6 +5,7 @@
 
 - segmenter: Framer → VAD → Segmenter で発話区間を切り出し、区間キューへ積む
 - asr: engine.load() を実行した後、区間を順に文字起こしし、幻覚を除いて on_segment で通知
+  (参考情報から作った用語ヒントを initial_prompt として渡し、ヒントの読み上げも除く)
 - summary: RollingSummarizer で要約を更新する(文字起こしが遅れている間は保留)
 
 ライブのテキストは best-effort であり、正となるのは WAV ファイルである。
@@ -22,9 +23,11 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from live.asr_hint import HINT_MIN_SEGMENT_SEC, build_asr_hint, is_hint_echo
 from live.chunk_queue import BoundedChunkQueue
 from live.context import LiveContext
 from live.framer import Framer
+from live.full_summary import summarize_full
 from live.hallucination import is_hallucination
 from live.segment_queue import DropOldestQueue
 from live.segmenter import Segment, Segmenter
@@ -39,6 +42,9 @@ if TYPE_CHECKING:
 __all__ = ["LiveCallbacks", "LiveResult", "LiveSegment", "LiveSession", "LiveSettings"]
 
 _logger = logging.getLogger("voicenote")
+
+# 停止時の残り時間のうち、全文要約に使う割合(残りはローリング要約のフォールバック用)
+_FULL_SUMMARY_TIME_SHARE = 0.7
 
 
 def _safe_call(fn: Callable, *args) -> None:
@@ -70,16 +76,21 @@ class LiveSession:
             backend: 要約用のチャットLLM。None なら要約しない
             callbacks: 通知先
             clock: 要約の実行間隔判定に使う時刻関数(stop の timeout には使わない)
-            context: 要約に渡す初期の参考情報(参加者・メモ)。None なら参考情報なし
+            context: 要約と用語ヒントに使う初期の参考情報(参加者・メモ)。None なら参考情報なし
         """
+        _validate_context(context)
         self._settings = settings
         self._engine = engine
         self._vad = vad
         self._callbacks = callbacks
         self._chunks = BoundedChunkQueue(settings.chunk_queue_size)
         self._segments: DropOldestQueue[Segment] = DropOldestQueue(settings.segment_queue_size)
+        self._backend = backend
         self._summarizer = self._create_summarizer(backend, clock, context)
         self._lock = threading.Lock()
+        # 参考情報と、そこから作った用語ヒント(ヒント文はログに出さない)。_lock 下で差し替える
+        self._context = context
+        self._asr_hint = build_asr_hint(context)
         self._backlog_samples = 0  # 整数で数え、浮動小数の誤差を溜めない
         self._dropped_segments = 0
         self._results: tuple[LiveSegment, ...] = ()
@@ -119,14 +130,19 @@ class LiveSession:
         return self._chunks.dropped
 
     def set_context(self, context: LiveContext | None) -> None:
-        """要約の参考情報(参加者・メモ)を差し替える。スレッドセーフで、次回の要約から反映する
+        """参考情報(参加者・メモ)を差し替える。スレッドセーフ
 
-        参考情報の変更だけでは要約を起動しない。要約しないセッション(backend=None)では何もしない。
+        用語ヒントは要約の有無に関係なく作り直し、次に文字起こしする区間から使う。
+        要約には次回の要約から反映する(参考情報の変更だけでは要約を起動しない)。
         """
+        _validate_context(context)
+        hint = build_asr_hint(context)
+        with self._lock:
+            self._context = context
+            self._asr_hint = hint
+        # 要約器のロックと入れ子にしない
         if self._summarizer is not None:
             self._summarizer.set_context(context)
-        elif context is not None and not isinstance(context, LiveContext):
-            raise TypeError(f"context は LiveContext が必要です: {type(context).__name__}")
 
     def start(self) -> None:
         """ワーカースレッドを起動する。2回目以降は RuntimeError"""
@@ -165,7 +181,8 @@ class LiveSession:
         1. 新規チャンクの受付を止める
         2. 残りのチャンクを区間化し、開いている区間を flush する
         3. 区間キューを文字起こしし切る(ドレイン)
-        4. 最終要約を1回試み、失敗・時間切れなら直前の要約を使う
+        4. 全文から最終要約を作り直す。失敗・時間切れならローリング要約を1回試み、
+           それも駄目なら直前の要約を使う
         """
         if self._result is not None:
             return self._result
@@ -204,7 +221,7 @@ class LiveSession:
         return done
 
     def _finish_summary(self, deadline: float) -> str:
-        """周期要約を止め、最終要約を timeout 付きで1回だけ試みる"""
+        """周期要約を止め、最終要約を timeout 付きで作る(全文要約 → ローリング要約の順に試す)"""
         summarizer = self._summarizer
         if summarizer is None:
             return ""
@@ -212,6 +229,46 @@ class LiveSession:
         if not self._join("live-summary", deadline):
             return summarizer.summary
         before = summarizer.summary
+        full = self._summarize_full(deadline)
+        if full:
+            if full != before:
+                _safe_call(self._callbacks.on_summary, full)
+            return full
+        return self._rolling_final_summary(summarizer, before, deadline)
+
+    def _summarize_full(self, deadline: float) -> str | None:
+        """全セグメントの文字起こしから要約を作り直す。残り時間の 70% までで諦める"""
+        with self._lock:
+            texts = tuple(seg.text for seg in self._results)
+            context = self._context
+        if self._backend is None or not texts:
+            return None
+        now = time.monotonic()
+        full_deadline = now + max(0.0, deadline - now) * _FULL_SUMMARY_TIME_SHARE
+        outcome: list[str | None] = []
+        worker = threading.Thread(
+            target=lambda: outcome.append(
+                summarize_full(
+                    self._backend,
+                    texts,
+                    context,
+                    deadline=full_deadline,
+                    clock=time.monotonic,
+                    cancel=self._abort_asr,
+                )
+            ),
+            name="live-full-summary",
+            daemon=True,
+        )
+        worker.start()
+        worker.join(max(0.0, full_deadline - time.monotonic()))
+        if worker.is_alive() or not outcome:
+            self._warn("全文からの最終要約が時間内に終わらなかったため、直前の要約を使います")
+            return None
+        return outcome[0]
+
+    def _rolling_final_summary(self, summarizer, before: str, deadline: float) -> str:
+        """ローリング要約を強制実行して最終要約とする。時間切れなら直前の要約"""
         # interval 判定を無視して強制実行するため now=inf を渡す(送信中なら何もしない)
         worker = threading.Thread(
             target=lambda: summarizer.maybe_run(now=math.inf, backlog_sec=0.0),
@@ -310,10 +367,19 @@ class LiveSession:
         _safe_call(self._callbacks.on_status, "ライブ文字起こし中")
         return True
 
+    def _hint_for(self, segment: Segment) -> str | None:
+        """区間に付ける用語ヒント。短い区間(反響しやすい)には付けない"""
+        if len(segment.samples) < HINT_MIN_SEGMENT_SEC * self._settings.sample_rate:
+            return None
+        with self._lock:
+            return self._asr_hint
+
     def _transcribe(self, segment: Segment) -> None:
-        """1区間を文字起こしし、幻覚でなければ結果に追加して通知する"""
+        """1区間を文字起こしし、幻覚・ヒントの反響でなければ結果に追加して通知する"""
+        # ヒントは区間ごとに1回だけ読み、エンジンへの指定と反響判定に同じ値を使う
+        hint = self._hint_for(segment)
         try:
-            result = self._engine.transcribe(segment.samples, self._settings.language)
+            result = self._engine.transcribe(segment.samples, self._settings.language, prompt=hint)
         except Exception as e:
             _logger.exception("区間の文字起こしに失敗しました")
             self._warn(f"区間 {segment.start_sec:.1f}s の文字起こしに失敗しました: {e}")
@@ -323,7 +389,7 @@ class LiveSession:
             text,
             no_speech_prob=getattr(result, "no_speech_prob", None),
             avg_logprob=getattr(result, "avg_logprob", None),
-        ):
+        ) or is_hint_echo(text, hint):
             return
         with self._lock:
             live_segment = LiveSegment(len(self._results), segment.start_sec, segment.end_sec, text)
@@ -338,6 +404,12 @@ class LiveSession:
         while not self._summary_stop.wait(self._settings.summary_poll_sec):
             if summarizer.maybe_run(backlog_sec=self.backlog_sec):
                 _safe_call(self._callbacks.on_summary, summarizer.summary)
+
+
+def _validate_context(context) -> None:
+    """context が None か LiveContext でなければ TypeError"""
+    if context is not None and not isinstance(context, LiveContext):
+        raise TypeError(f"context は LiveContext が必要です: {type(context).__name__}")
 
 
 def _segment_args(segment: LiveSegment) -> tuple[int, float, float, str]:

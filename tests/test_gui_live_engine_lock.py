@@ -22,12 +22,14 @@ class _Inner:
     def __init__(self):
         self.loaded = 0
         self.transcribed = 0
+        self.prompts: list[str | None] = []
 
     def load(self):
         self.loaded += 1
 
-    def transcribe(self, samples, language):
+    def transcribe(self, samples, language, prompt=None):
         self.transcribed += 1
+        self.prompts.append(prompt)
         return "text"
 
 
@@ -66,6 +68,13 @@ class TestSerializedEngineLoad:
         assert SerializedEngine(inner, lock).transcribe(None, "ja") == "text"
         assert inner.transcribed == 1
         assert not lock.locked()
+
+    def test_transcribe_forwards_prompt(self):
+        inner, lock = _Inner(), threading.Lock()
+        engine = SerializedEngine(inner, lock)
+        engine.transcribe(None, "ja", prompt="参加者: 田中。")
+        engine.transcribe(None, "ja")
+        assert inner.prompts == ["参加者: 田中。", None]
 
 
 class TestWorkflowPassesTimeout:

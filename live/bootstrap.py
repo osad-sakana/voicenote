@@ -86,9 +86,9 @@ class FallbackOnLoadEngine:
         fallback.load()
         self._active = fallback
 
-    def transcribe(self, samples, language):
-        """現在有効なエンジンで文字起こしする"""
-        return self._active.transcribe(samples, language)
+    def transcribe(self, samples, language, prompt=None):
+        """現在有効なエンジンで文字起こしする(prompt は用語ヒント)"""
+        return self._active.transcribe(samples, language, prompt=prompt)
 
 
 def fallback_model(model: str) -> str:

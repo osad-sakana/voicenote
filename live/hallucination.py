@@ -39,9 +39,13 @@ NO_SPEECH_PROB_THRESHOLD = 0.6
 AVG_LOGPROB_THRESHOLD = -1.0
 
 
-def _normalize(text: str) -> str:
+def normalize_for_compare(text: str) -> str:
     """空白・句読点を除去し小文字化した比較用文字列を返す"""
     return STRIP_CHARS_PATTERN.sub("", text).lower()
+
+
+# 互換のための旧名(モジュール内の既存呼び出しもこちらを使う)
+_normalize = normalize_for_compare
 
 
 def _phrase_covered_indices(normalized: str) -> frozenset[int]:

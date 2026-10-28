@@ -114,6 +114,21 @@ class TestFasterWhisperEngine:
         assert kwargs["condition_on_previous_text"] is False
         assert kwargs["vad_filter"] is False
 
+    def test_prompt_is_passed_as_initial_prompt(self, fake_fw, samples):
+        engine = FasterWhisperEngine("small")
+        engine.transcribe(samples, "ja", prompt="参加者: 田中。")
+        _, kwargs = fake_fw.instances[0].calls[0]
+        assert kwargs["initial_prompt"] == "参加者: 田中。"
+        assert kwargs["condition_on_previous_text"] is False
+
+    @pytest.mark.parametrize("prompt", [None, ""])
+    def test_no_prompt_gives_none(self, fake_fw, samples, prompt):
+        engine = FasterWhisperEngine("small")
+        engine.transcribe(samples, "ja", prompt=prompt)
+        engine.transcribe(samples, "ja")
+        for _, kwargs in fake_fw.instances[0].calls:
+            assert kwargs["initial_prompt"] is None
+
     @pytest.mark.parametrize("language", [None, "en", "ja"])
     def test_language_is_passed_through(self, fake_fw, samples, language):
         engine = FasterWhisperEngine("small")
@@ -230,6 +245,25 @@ class TestMlxWhisperEngine:
         assert kwargs["language"] == "ja"
         assert kwargs["condition_on_previous_text"] is False
         assert "beam_size" not in kwargs
+
+    def test_prompt_is_passed_as_initial_prompt(self, fake_mlx, samples):
+        engine = MlxWhisperEngine("mlx-community/whisper-small-mlx")
+        engine.transcribe(samples, "ja", prompt="用語: 予算。")
+        _, kwargs = fake_mlx.transcribe.call_args_list[-1]
+        assert kwargs["initial_prompt"] == "用語: 予算。"
+        assert kwargs["condition_on_previous_text"] is False
+
+    @pytest.mark.parametrize("prompt", [None, ""])
+    def test_no_prompt_gives_none(self, fake_mlx, samples, prompt):
+        engine = MlxWhisperEngine("mlx-community/whisper-small-mlx")
+        engine.transcribe(samples, "ja", prompt=prompt)
+        _, kwargs = fake_mlx.transcribe.call_args_list[-1]
+        assert kwargs["initial_prompt"] is None
+
+    def test_warmup_has_no_prompt(self, fake_mlx):
+        MlxWhisperEngine("mlx-community/whisper-small-mlx").load()
+        _, kwargs = fake_mlx.transcribe.call_args
+        assert kwargs.get("initial_prompt") is None
 
     def test_language_none_is_passed_through(self, fake_mlx, samples):
         engine = MlxWhisperEngine("mlx-community/whisper-small-mlx")

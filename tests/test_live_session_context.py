@@ -5,6 +5,7 @@ import threading
 import numpy as np
 import pytest
 
+from live.asr_hint import build_asr_hint
 from live.context import LiveContext
 from live.session import LiveSession, LiveSettings
 from live.vad import EnergyVAD
@@ -23,14 +24,21 @@ class Text:
 
 
 class FakeEngine:
-    def __init__(self):
+    def __init__(self, respond=None):
         self.calls = 0
+        self.prompts: list[str | None] = []
+        self.lengths: list[int] = []
+        self._respond = respond  # (engine, prompt) -> 認識結果の文字列
 
     def load(self):
         return None
 
-    def transcribe(self, samples, language):
+    def transcribe(self, samples, language, prompt=None):
         self.calls += 1
+        self.prompts.append(prompt)
+        self.lengths.append(len(samples))
+        if self._respond is not None:
+            return Text(self._respond(self, prompt))
         return Text(f"発話{self.calls}")
 
 
@@ -60,10 +68,20 @@ def feed_audio(session: LiveSession, audio: np.ndarray) -> None:
         session.feed(audio[start : start + CHUNK])
 
 
-def make_session(backend, **kwargs) -> LiveSession:
+def tone(seconds: float) -> np.ndarray:
+    t = np.arange(int(SR * seconds)) / SR
+    return (0.3 * np.sin(2 * np.pi * 440 * t)).astype(np.float32)
+
+
+def make_session(backend, engine=None, **kwargs) -> LiveSession:
     settings = LiveSettings(summary_poll_sec=0.01, summary_interval_sec=3600)
     return LiveSession(
-        settings, engine=FakeEngine(), vad=EnergyVAD(), backend=backend, clock=lambda: 0.0, **kwargs
+        settings,
+        engine=engine or FakeEngine(),
+        vad=EnergyVAD(),
+        backend=backend,
+        clock=lambda: 0.0,
+        **kwargs,
     )
 
 
@@ -99,7 +117,7 @@ class TestLiveSessionContext:
         session.stop(timeout=WAIT_SEC)
         assert "議題: 予算" in _user(backend.messages[-1])
 
-    def test_set_context_without_backend_is_noop(self):
+    def test_set_context_without_backend_has_no_summary(self):
         session = make_session(None)
         session.set_context(LiveContext(memo="x"))
         session.start()
@@ -141,3 +159,91 @@ class TestLiveSessionContext:
             lines = [line for line in _user(messages).splitlines() if line.startswith("- 人")]
             assert len(lines) <= 1
             assert set(lines) <= expected
+
+
+CTX = LiveContext(participants=("田中", "佐藤"), memo="予算\nKubernetes")
+
+
+class TestLiveSessionAsrHint:
+    def test_initial_context_becomes_prompt(self):
+        engine = FakeEngine()
+        session = make_session(None, engine=engine, context=CTX)
+        session.start()
+        feed_audio(session, bursts(1))
+        session.stop(timeout=WAIT_SEC)
+        assert engine.prompts == [build_asr_hint(CTX)]
+
+    def test_no_context_gives_no_prompt(self):
+        engine = FakeEngine()
+        session = make_session(RecordingBackend(), engine=engine)
+        session.start()
+        feed_audio(session, bursts(1))
+        session.stop(timeout=WAIT_SEC)
+        assert engine.prompts == [None]
+
+    @pytest.mark.parametrize("backend", [RecordingBackend(), None])
+    def test_set_context_updates_prompt_with_or_without_backend(self, backend):
+        engine = FakeEngine()
+        session = make_session(backend, engine=engine)
+        session.set_context(CTX)
+        session.start()
+        feed_audio(session, bursts(1))
+        session.stop(timeout=WAIT_SEC)
+        assert engine.prompts == [build_asr_hint(CTX)]
+
+    def test_set_context_none_clears_prompt(self):
+        engine = FakeEngine()
+        session = make_session(None, engine=engine, context=CTX)
+        session.set_context(None)
+        session.start()
+        feed_audio(session, bursts(1))
+        session.stop(timeout=WAIT_SEC)
+        assert engine.prompts == [None]
+
+    def test_short_segment_gets_no_prompt(self):
+        engine = FakeEngine()
+        session = make_session(None, engine=engine, context=CTX)
+        session.start()
+        # 無音を続けずに止めると、0.6秒の発話が flush されて短い区間になる
+        feed_audio(session, tone(0.6))
+        result = session.stop(timeout=WAIT_SEC)
+        assert len(engine.lengths) == 1
+        assert engine.lengths[0] < SR  # 1秒未満の区間であることを確認
+        assert engine.prompts == [None]
+        assert len(result.segments) == 1
+
+    def test_hint_echo_segment_is_dropped(self):
+        hint = build_asr_hint(CTX)
+        engine = FakeEngine(respond=lambda eng, prompt: hint if eng.calls == 1 else "本題です")
+        session = make_session(None, engine=engine, context=CTX)
+        session.start()
+        feed_audio(session, bursts(2))
+        result = session.stop(timeout=WAIT_SEC)
+        assert [s.text for s in result.segments] == ["本題です"]
+        assert result.segments[0].index == 0
+
+    def test_single_name_is_kept(self):
+        engine = FakeEngine(respond=lambda eng, prompt: "田中")
+        session = make_session(None, engine=engine, context=CTX)
+        session.start()
+        feed_audio(session, bursts(1))
+        result = session.stop(timeout=WAIT_SEC)
+        assert [s.text for s in result.segments] == ["田中"]
+
+    def test_hint_is_read_once_per_segment(self):
+        """文字起こし中に参考情報が変わっても、反響判定はエンジンに渡したヒントで行う"""
+        old_hint = build_asr_hint(CTX)
+        holder: dict[str, LiveSession] = {}
+
+        def respond(eng, prompt):
+            holder["session"].set_context(None)
+            return old_hint
+
+        engine = FakeEngine(respond=respond)
+        session = make_session(None, engine=engine, context=CTX)
+        holder["session"] = session
+        session.start()
+        feed_audio(session, bursts(1))
+        result = session.stop(timeout=WAIT_SEC)
+        assert engine.prompts == [old_hint]
+        assert result.segments == ()

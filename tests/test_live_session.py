@@ -85,7 +85,7 @@ class FakeEngine:
         if self._load_error is not None:
             raise self._load_error
 
-    def transcribe(self, samples, language):
+    def transcribe(self, samples, language, prompt=None):
         self.calls += 1
         self.languages.append(language)
         if self._responses:
@@ -299,7 +299,7 @@ class TestFiltering:
 
     def test_no_speech_prob_is_respected(self):
         class NoSpeechEngine(FakeEngine):
-            def transcribe(self, samples, language):
+            def transcribe(self, samples, language, prompt=None):
                 return Text("それっぽい文章", no_speech_prob=0.9, avg_logprob=-1.5)
 
         session = make_session(NoSpeechEngine())
@@ -552,6 +552,40 @@ class TestSummary:
         feed_audio(session, bursts(1))
         result = session.stop(timeout=WAIT_SEC)
         assert result.final_summary == SUMMARY_TEXT
+
+    def test_final_summary_is_built_from_all_segments(self):
+        """停止時の最終要約は、ローリング要約ではなく全セグメントの文字起こしから作る"""
+        seen: list[str] = []
+
+        class RecordingBackend(FakeBackend):
+            def complete(self, messages):
+                seen.append("\n".join(m["content"] for m in messages))
+                return super().complete(messages)
+
+        engine = FakeEngine(responses=["最初の話題です", "二番目の話題です", "三番目の話題です"])
+        session = make_session(
+            engine, backend=RecordingBackend(), clock=FakeClock(0.0), rec=Recorder()
+        )
+        session.start()
+        feed_audio(session, bursts(3))
+        result = session.stop(timeout=WAIT_SEC)
+        assert len(result.segments) == 3
+        assert result.final_summary == SUMMARY_TEXT
+        final_prompt = seen[-1]
+        assert all(
+            t in final_prompt for t in ("最初の話題です", "二番目の話題です", "三番目の話題です")
+        )
+
+    def test_full_summary_failure_falls_back_to_rolling(self):
+        """全文要約が不採用でも、ローリング要約で最終要約を試みる"""
+        backend = FakeBackend(reply="short")  # 日本語として不採用になり、全文要約は None
+        rec = Recorder()
+        session = make_session(FakeEngine(), backend=backend, rec=rec, clock=FakeClock(0.0))
+        session.start()
+        feed_audio(session, bursts(1))
+        result = session.stop(timeout=WAIT_SEC)
+        assert backend.calls >= 2  # 全文要約 + ローリング要約のフォールバック
+        assert result.final_summary == ""  # どちらも不採用なので、直前の要約(無し)のまま
 
     def test_works_without_backend(self):
         rec = Recorder()

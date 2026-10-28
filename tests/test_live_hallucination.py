@@ -2,7 +2,7 @@
 
 import pytest
 
-from live.hallucination import is_hallucination
+from live.hallucination import _normalize, is_hallucination, normalize_for_compare
 
 
 @pytest.mark.parametrize(
@@ -111,3 +111,11 @@ def test_pure_repeated_thanks_is_hallucination():
 def test_long_utterance_containing_known_phrase_is_not_hallucination(text):
     """定型句を含んでも、文全体がほぼ定型句でない長い発話は捨てない"""
     assert is_hallucination(text) is False
+
+
+def test_normalize_for_compare_strips_punctuation_and_lowercases():
+    assert normalize_for_compare("Hello, 世界。 テスト！") == "hello世界テスト"
+
+
+def test_private_normalize_is_kept_for_compatibility():
+    assert _normalize("A。b") == normalize_for_compare("A。b")

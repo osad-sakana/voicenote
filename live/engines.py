@@ -20,6 +20,9 @@
   whisper-small-mlx(481MB), whisper-medium-mlx(1.5GB), whisper-large-v3-mlx(3.1GB),
   whisper-large-v3-turbo(1.6GB, こちらは "-mlx" 接尾辞なし)
 
+- `initial_prompt: Optional[str] = None` を受け付ける(mlx-whisper 0.4.3 の .venv で確認)。
+  condition_on_previous_text=False でも、区間(30秒以内)の最初のウィンドウには効く
+
 faster-whisper 1.2.1: `WhisperModel.transcribe(audio: Union[str, BinaryIO, np.ndarray], ...)` は
 `(segments ジェネレータ, info)` を返し、各 Segment は no_speech_prob / avg_logprob を持つ。
 """
@@ -73,8 +76,13 @@ class SpeechEngine(Protocol):
         """モデルを読み込む(複数回呼んでも読み込みは1回)"""
         ...
 
-    def transcribe(self, samples: np.ndarray, language: str | None) -> TranscribedText:
-        """16kHz mono float32 の1次元配列を文字起こしする。language=None は自動検出"""
+    def transcribe(
+        self, samples: np.ndarray, language: str | None, prompt: str | None = None
+    ) -> TranscribedText:
+        """16kHz mono float32 の1次元配列を文字起こしする。language=None は自動検出
+
+        prompt は Whisper の initial_prompt(用語ヒント)。None・空文字はヒントなし
+        """
         ...
 
 
@@ -152,7 +160,9 @@ class FasterWhisperEngine:
             ) from e
         self._notify(f"faster-whisper モデル '{self._model_name}' の読み込みが完了しました")
 
-    def transcribe(self, samples: np.ndarray, language: str | None) -> TranscribedText:
+    def transcribe(
+        self, samples: np.ndarray, language: str | None, prompt: str | None = None
+    ) -> TranscribedText:
         audio = _prepare_samples(samples)
         if audio.size == 0:
             return TranscribedText(text="", language=language)
@@ -162,6 +172,7 @@ class FasterWhisperEngine:
             language=language,
             beam_size=FASTER_WHISPER_BEAM_SIZE,
             condition_on_previous_text=False,
+            initial_prompt=prompt or None,
             vad_filter=False,
         )
         segments = list(segments_iter)
@@ -241,7 +252,9 @@ class MlxWhisperEngine:
         self._mlx_whisper = module
         self._notify(f"mlx モデル '{self._model_repo}' の読み込みが完了しました")
 
-    def transcribe(self, samples: np.ndarray, language: str | None) -> TranscribedText:
+    def transcribe(
+        self, samples: np.ndarray, language: str | None, prompt: str | None = None
+    ) -> TranscribedText:
         audio = _prepare_samples(samples)
         if audio.size == 0:
             return TranscribedText(text="", language=language)
@@ -251,6 +264,7 @@ class MlxWhisperEngine:
             path_or_hf_repo=self._model_repo,
             language=language,
             condition_on_previous_text=False,
+            initial_prompt=prompt or None,
             verbose=None,
         )
         segments = result.get("segments") or []

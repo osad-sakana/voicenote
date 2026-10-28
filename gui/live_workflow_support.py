@@ -223,9 +223,9 @@ class SerializedEngine:
         finally:
             self._lock.release()
 
-    def transcribe(self, samples, language):
+    def transcribe(self, samples, language, prompt=None):
         with self._lock:
-            return self._inner.transcribe(samples, language)
+            return self._inner.transcribe(samples, language, prompt=prompt)
 
 
 class DownloadProgress:
