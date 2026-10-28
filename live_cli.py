@@ -240,8 +240,12 @@ def run_live(config: VoiceNoteConfig, device: str | None, dest_dir: Path) -> Non
 def _drain(session: LiveSession) -> LiveResult | None:
     """残り区間を文字起こしして結果を返す
 
-    Ctrl+C なら要約を打ち切り(cancel_summary)、それまでの区間と直前の要約で結果を作る
-    (GUI の「中断して保存」と同じ)。その間にもう一度 Ctrl+C されたら None(ノートを作らない)。
+    Ctrl+C なら残りの文字起こし・要約を打ち切り(cancel_summary)、それまでの区間と直前の要約で
+    結果を作る(GUI の「中断して保存」の部分ノートと同じ)。その間にもう一度 Ctrl+C されたら
+    None(ノートを作らない)。
+
+    GUI の中断と違い、CLI は中断後も速報版ノートを保存して _refine_phase(停止後の高精度
+    再文字起こし。有効なら)へ進む。再文字起こしも Ctrl+C で中断できる。
     """
     console.print(
         "[cyan]残りの区間を文字起こしし、最終要約を作成しています..."
@@ -256,7 +260,7 @@ def _drain(session: LiveSession) -> LiveResult | None:
         # record_audio は戻る前に SIGINT ハンドラを復元するため、ここでの Ctrl+C は
         # KeyboardInterrupt になる。WAV は確定済み
         pass
-    _warn("最終要約を中断しました。ここまでの区間と直前の要約でノートを保存します")
+    _warn("文字起こし・要約を中断しました。ここまでの区間と直前の要約でノートを保存します")
     session.cancel_summary()
     try:
         return session.stop(timeout=ERROR_STOP_TIMEOUT_SEC, summary_timeout=0.0)

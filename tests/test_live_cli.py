@@ -205,7 +205,7 @@ class TestInterruptDuringStop:
         assert "save_live_note" in env.events
         assert "テスト発話" in env.note_bodies[0]
         text = env.out.getvalue()
-        assert "要約" in text and "中断" in text
+        assert "文字起こし・要約を中断しました" in text
 
     def _interrupt(self, env):
         def stop(timeout=None, **_kw):

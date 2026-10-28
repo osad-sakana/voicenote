@@ -610,7 +610,7 @@ class TestSummary:
 
         budgets: list[float] = []
 
-        def fake_summarize_full(backend, texts, context, *, deadline, clock, cancel):
+        def fake_summarize_full(backend, texts, context, *, deadline, clock, cancel, on_skip=None):
             budgets.append(deadline - clock())
             time.sleep(0.3)  # ドレインの timeout(0.2秒)より長くかかる
             return SUMMARY_TEXT
@@ -631,7 +631,7 @@ class TestSummary:
         gate = gates()
         seen: list = []
 
-        def fake_summarize_full(backend, texts, context, *, deadline, clock, cancel):
+        def fake_summarize_full(backend, texts, context, *, deadline, clock, cancel, on_skip=None):
             seen.append(cancel)
             gate.wait(timeout=5.0)
             return None
@@ -699,6 +699,47 @@ class TestSummary:
         result = session.stop(timeout=WAIT_SEC)
         assert backend.calls == baseline
         assert result.final_summary == SUMMARY_TEXT
+
+    def test_full_summary_deadline_counts_from_after_periodic_wait(self, monkeypatch):
+        """周期要約の呼び出し中に停止しても、その待ちの分で全文要約の期限が削られない"""
+        import live.full_summary as full_summary_module
+
+        monkeypatch.setattr(full_summary_module, "FULL_SUMMARY_MARGIN_SEC", 0.1)
+        rec = Recorder()
+
+        class SlowFirst(FakeBackend):
+            def complete(self, messages):
+                self.calls += 1
+                if self.calls == 1:
+                    time.sleep(0.5)  # 停止時に周期要約が送信中
+                return self.reply
+
+        backend = SlowFirst()
+        session = make_session(FakeEngine(), backend=backend, rec=rec, clock=FakeClock(0.0))
+        session.start()
+        feed_audio(session, bursts(1))
+        assert wait_until(lambda: backend.calls >= 1)
+        result = session.stop(timeout=WAIT_SEC)
+        assert backend.calls >= 2  # 全文要約が実行された
+        assert result.final_summary == SUMMARY_TEXT
+        assert not any("省き" in w for w in rec.warnings)
+
+    def test_skipped_full_summary_is_warned_without_content(self, monkeypatch):
+        """全文要約を省いたら on_warning で知らせる(塊数・秒数のみ、本文は出さない)"""
+        import live.full_summary as full_summary_module
+
+        monkeypatch.setattr(full_summary_module, "FULL_SUMMARY_MARGIN_SEC", -1.0)  # 必ず不足
+        rec = Recorder()
+        engine = FakeEngine(responses=["秘密の発話内容です"])
+        session = make_session(engine, backend=FakeBackend(), rec=rec, clock=FakeClock(0.0))
+        session.start()
+        feed_audio(session, bursts(1))
+        assert wait_until(lambda: len(rec.segments) == 1)
+        session.stop(timeout=WAIT_SEC)
+        skipped = [w for w in rec.warnings if "全文" in w and "省き" in w]
+        assert len(skipped) == 1, rec.warnings
+        assert "1 塊" in skipped[0] and "秒" in skipped[0]
+        assert "秘密" not in skipped[0]
 
     def test_wait_asr_idle_true_after_stop(self):
         session = make_session(FakeEngine())

@@ -145,11 +145,13 @@ def summarize_full(
     cancel: CancelFlag | None = None,
     max_chunk_chars: int = FULL_CHUNK_CHARS,
     sec_per_call: float = FULL_SUMMARY_SEC_PER_CALL,
+    on_skip: Callable[[int, float, float], None] | None = None,
 ) -> str | None:
     """全セグメントの文字起こしから要約を作る。作れなければ None。
 
     必要時間の見積もり((塊数 + 統合1回) × sec_per_call)が、deadline までの残り時間を
     超えるなら最初から呼び出さずに None を返す(途中で打ち切られる要約に時間を使わない)。
+    そのとき on_skip(塊数, 見積もり秒, 残り秒) を呼ぶ(利用者への通知用。本文は渡さない)。
     各 LLM 呼び出しの前に deadline（clock 基準の絶対時刻）と cancel を確認し、
     超過・キャンセル・例外・不採用の応答が1つでもあれば None を返す。
     1塊に収まれば呼び出しは1回だけ。複数塊なら塊ごとに要約してから統合する。
@@ -165,6 +167,11 @@ def summarize_full(
             estimate,
             max(0.0, remaining),
         )
+        if on_skip is not None:
+            try:
+                on_skip(len(chunks), estimate, max(0.0, remaining))
+            except Exception:
+                _logger.exception("全文要約の省略の通知に失敗しました")
         return None
     partials: list[str] = []
     for chunk in chunks:

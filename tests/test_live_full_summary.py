@@ -329,3 +329,19 @@ def test_default_estimate_uses_sec_per_call_constant():
     deadline = FULL_SUMMARY_SEC_PER_CALL * 2 - 1  # 1塊 + 統合1回分に1秒足りない
     assert summarize_full(backend, ["発言"], None, deadline=deadline, clock=FakeClock()) is None
     assert backend.calls == []
+
+
+def test_on_skip_receives_counts_only():
+    skips = []
+    backend = FakeBackend()
+    result = _run(
+        backend,
+        ["あ" * 8, "い" * 8],
+        max_chunk_chars=10,
+        sec_per_call=60.0,
+        deadline=100.0,
+        on_skip=lambda chunks, estimate, remaining: skips.append((chunks, estimate, remaining)),
+    )
+    assert result is None
+    assert skips == [(2, 180.0, 100.0)]
+    assert backend.calls == []

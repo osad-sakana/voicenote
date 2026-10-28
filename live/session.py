@@ -47,6 +47,8 @@ _logger = logging.getLogger("voicenote")
 _FULL_SUMMARY_TIME_SHARE = 0.7
 # summary_timeout 未指定時、全文要約の上限に足すローリング要約へのフォールバック用の時間
 ROLLING_FINAL_RESERVE_SEC = 60.0
+# summary_timeout 未指定時、停止時に送信中の周期要約を待つ上限(全文要約の期限とは別に数える)
+PERIODIC_SUMMARY_WAIT_SEC = 120.0
 _CANCEL_POLL_SEC = 0.05  # cancel_summary を確認する間隔
 
 
@@ -189,9 +191,11 @@ class LiveSession:
         4. 全文から最終要約を作り直す。失敗・時間切れならローリング要約を1回試み、
            それも駄目なら直前の要約を使う(最大 summary_timeout 秒)
 
-        summary_timeout=None なら全文要約の上限を文字起こしの量に比例させ(full_summary_timeout:
-        LLM の呼び出し回数 × 1回あたり、下限・上限あり)、ローリング要約への切り替え用に
-        ROLLING_FINAL_RESERVE_SEC を足す。指定時はその 70% を全文要約に使う。0 以下なら LLM を
+        summary_timeout=None なら、送信中の周期要約を最大 PERIODIC_SUMMARY_WAIT_SEC 待った後から
+        全文要約の上限を文字起こしの量に比例させて数え(full_summary_timeout: LLM の呼び出し回数 ×
+        1回あたり、下限・上限あり)、ローリング要約への切り替え用に ROLLING_FINAL_RESERVE_SEC を足す。
+        指定時は全体をその秒数で区切り、70% を全文要約に使う(1回あたり60秒の見積もりでは
+        約171秒未満だと全文要約は見積もり不足で省かれ、on_warning で知らせる)。0 以下なら LLM を
         呼ばずに直前の要約を使う(エラー・取り消し・緊急停止の経路)。待ちは cancel_summary で
         打ち切れる(GUI の「中断して保存」・終了、CLI の Ctrl+C)。時間切れの全文要約には専用の
         cancel を立て、以降の LLM 呼び出しをさせない(送信中の1回は LLM 側の timeout まで続きうる)。
@@ -250,19 +254,21 @@ class LiveSession:
         self._summary_cancelled.set()
         self._abort_full_summary.set()
 
-    def _summary_budgets(self, summary_timeout: float | None) -> tuple[float, float]:
-        """(全文要約に使う秒数, 最終要約全体の秒数)
+    def _full_deadlines(self, summary_timeout: float | None, started: float) -> tuple[float, float]:
+        """(全文要約の期限, 最終要約全体の期限)。周期要約を待った後に呼ぶ
 
-        未指定なら全文要約は文字起こしの量に比例させ(full_summary_timeout)、ローリング要約への
-        フォールバック用に ROLLING_FINAL_RESERVE_SEC を足す。指定時はその 70% を全文要約に使う。
+        未指定なら、全文要約の期限を「今」(周期要約の待ちの後)から full_summary_timeout で数え、
+        ローリング要約への切り替え用に ROLLING_FINAL_RESERVE_SEC を足す。
+        指定時は stop の要約開始(started)から summary_timeout 全体で区切り、その 70% を
+        全文要約に使う(既定の1回あたり60秒では約171秒未満だと全文要約は見積もり不足で省かれる)。
         """
         if summary_timeout is None:
             with self._lock:
                 texts = tuple(seg.text for seg in self._results)
-            full = full_summary_timeout(texts)
-            return full, full + ROLLING_FINAL_RESERVE_SEC
+            full_deadline = time.monotonic() + full_summary_timeout(texts)
+            return full_deadline, full_deadline + ROLLING_FINAL_RESERVE_SEC
         total = max(0.0, summary_timeout)
-        return total * _FULL_SUMMARY_TIME_SHARE, total
+        return started + total * _FULL_SUMMARY_TIME_SHARE, started + total
 
     def _wait(self, thread: threading.Thread | None, deadline: float) -> bool:
         """スレッドを deadline まで待つ。cancel_summary で待ちを打ち切る。終了していれば True"""
@@ -286,21 +292,23 @@ class LiveSession:
         self._summary_stop.set()
         if summary_timeout is not None and summary_timeout <= 0:
             return summarizer.summary
-        full_sec, total_sec = self._summary_budgets(summary_timeout)
         started = time.monotonic()
-        if not self._wait(self._threads.get("live-summary"), started + total_sec):
+        # 送信中の周期要約を待つ。全文要約の期限はこの待ちの後から数える(待ちで削られない)
+        wait_limit = PERIODIC_SUMMARY_WAIT_SEC if summary_timeout is None else summary_timeout
+        if not self._wait(self._threads.get("live-summary"), started + max(0.0, wait_limit)):
             return summarizer.summary
         before = summarizer.summary
         if self._summary_cancelled.is_set():
             return before
-        full = self._summarize_full(min(started + full_sec, started + total_sec))
+        full_deadline, total_deadline = self._full_deadlines(summary_timeout, started)
+        full = self._summarize_full(min(full_deadline, total_deadline))
         if full:
             if full != before:
                 _safe_call(self._callbacks.on_summary, full)
             return full
         if self._summary_cancelled.is_set():
             return before
-        return self._rolling_final_summary(summarizer, before, started + total_sec)
+        return self._rolling_final_summary(summarizer, before, total_deadline)
 
     def _summarize_full(self, full_deadline: float) -> str | None:
         """全セグメントの文字起こしから要約を作り直す。full_deadline までで諦める"""
@@ -319,6 +327,7 @@ class LiveSession:
                     deadline=full_deadline,
                     clock=time.monotonic,
                     cancel=_AnySet(self._abort_asr, self._abort_full_summary),
+                    on_skip=self._warn_full_summary_skipped,
                 )
             ),
             name="live-full-summary",
@@ -332,6 +341,13 @@ class LiveSession:
                 self._warn("全文からの最終要約が時間内に終わらなかったため、直前の要約を使います")
             return None
         return outcome[0]
+
+    def _warn_full_summary_skipped(self, chunks: int, estimate: float, remaining: float) -> None:
+        """全文要約を省いたことを知らせる(塊数・秒数のみ。本文は出さない)"""
+        self._warn(
+            f"全文からの最終要約は時間内に終わらない見込みのため省きました"
+            f"（{chunks} 塊・見込み {estimate:.0f} 秒 > 残り {remaining:.0f} 秒）"
+        )
 
     def _rolling_final_summary(self, summarizer, before: str, deadline: float) -> str:
         """ローリング要約を強制実行して最終要約とする。時間切れなら直前の要約"""
