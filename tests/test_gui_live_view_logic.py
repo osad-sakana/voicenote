@@ -317,3 +317,31 @@ class TestResultText:
     def test_without_note(self, tmp_path):
         wav = tmp_path / "a_recording.wav"
         assert result_text(wav, None) == "WAV: a_recording.wav"
+
+
+class TestTranscriptLayout:
+    def test_toggle_text(self):
+        from gui.live_view_logic import transcript_toggle_text
+
+        assert transcript_toggle_text(False) == "文字起こしを隠す"
+        assert transcript_toggle_text(True) == "文字起こしを表示"
+
+    def test_textbox_height_grows_with_lines(self):
+        from gui.live_view_logic import textbox_height
+
+        assert textbox_height(4, 12) > textbox_height(3, 12) > 0
+        assert textbox_height(3, 15) > textbox_height(3, 12)
+
+    def test_textbox_height_four_lines_is_small(self):
+        from gui.live_view_logic import TRANSCRIPT_LINES, textbox_height
+
+        # 文字起こしは数行分(副表示)
+        assert 3 <= TRANSCRIPT_LINES <= 5
+        assert textbox_height(TRANSCRIPT_LINES, 12) <= 100
+
+    @pytest.mark.parametrize("lines, size", [(0, 12), (-1, 12), (3, 0)])
+    def test_textbox_height_invalid(self, lines, size):
+        from gui.live_view_logic import textbox_height
+
+        with pytest.raises(ValueError):
+            textbox_height(lines, size)

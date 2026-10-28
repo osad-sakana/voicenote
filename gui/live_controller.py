@@ -17,7 +17,8 @@ from config import VoiceNoteConfig
 from . import theme
 from .constants import MODE_LIVE, MODE_TRANSCRIBE_ONLY
 from .devices import parse_device_id
-from .live_layout import build_live_panel
+from .live_context_logic import ContextSync
+from .live_layout import LivePanelCommands, build_live_panel
 from .live_panel import LivePanel
 from .live_state import LivePhase, LiveViewState
 from .live_view_logic import (
@@ -66,7 +67,22 @@ class LiveController:
             on_error=lambda msg: submit(self._on_error, msg),
         )
         self._workflow = (factory or default_live_factory)(app._config, callbacks, self._can_start)
-        self._panel = LivePanel(build_live_panel(app, self._on_retranscribe))
+        commands = LivePanelCommands(
+            on_retranscribe=self._on_retranscribe,
+            on_context_change=self._on_context_change,
+            on_context_clear=self._on_context_clear,
+            on_toggle_transcript=self._on_toggle_transcript,
+        )
+        self._panel = LivePanel(build_live_panel(app, commands))
+        form = self._panel.context_form
+        # 参加者・メモはどの段階でも編集でき、デバウンスしてワークフローへ渡す(本文はログに出さない)
+        self._context_sync = ContextSync(
+            read_inputs=form.read_inputs,
+            push=self._workflow.update_context,
+            on_notice=form.show_notice,
+            schedule=app.after,
+            cancel=app.after_cancel,
+        )
         self._state = LiveViewState()
         self._last_wav: Path | None = None
         self._last_warning: str | None = None
@@ -143,6 +159,8 @@ class LiveController:
             mic_busy=busy,
             stream_closing=app._workflow.has_pending_close(),
         )
+        # デバウンス待ちの編集を取りこぼさないよう、開始前に最新の入力を必ず渡す
+        self._context_sync.flush(force=True)
         if error:
             messagebox.showwarning(*error)
             return
@@ -160,6 +178,8 @@ class LiveController:
         """ウィンドウを閉じる時に呼ぶ(部分ノートを同期保存する)"""
         self._cancel_meter()
         self._cancel_reset()
+        # 終了時に保存する部分ノートへ、デバウンス待ちの編集も入れる
+        self._context_sync.flush()
         self._workflow.shutdown()
 
     # ──────────────── workflow コールバック (メインスレッドで実行) ────────────────
@@ -236,6 +256,20 @@ class LiveController:
         app._on_mode_change()
         app._file_entry.delete(0, "end")
         app._file_entry.insert(0, str(wav))
+
+    # ──────────────── 参加者・メモ / 文字起こし欄 ────────────────
+
+    def _on_context_change(self) -> None:
+        if self._app._alive:
+            self._context_sync.on_input_changed()
+
+    def _on_context_clear(self) -> None:
+        """「クリア」: 入力欄を空にし、参考情報も空にする(ライブ中でも可)"""
+        self._context_sync.clear()
+        self._panel.context_form.clear_inputs()
+
+    def _on_toggle_transcript(self) -> None:
+        self._panel.toggle_transcript()
 
     # ──────────────── 入力メーター ────────────────
 

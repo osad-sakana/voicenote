@@ -7,6 +7,8 @@ from gui.mode_logic import (
     COMPACT_HEIGHT,
     EXPANDED_HEIGHT,
     LIVE_HEIGHT,
+    LIVE_MAX_DEFAULT_HEIGHT,
+    LIVE_MIN_HEIGHT,
     LIVE_WIDTH,
     NORMAL_WIDTH,
     normal_exec_spec,
@@ -41,6 +43,11 @@ class TestWindowSpec:
 
     def test_geometry_string(self):
         assert window_spec(MODE_LIVE, log_visible=False).geometry == f"{LIVE_WIDTH}x{LIVE_HEIGHT}"
+
+    def test_live_size(self):
+        # 幅は従来どおり。高さは参加者・メモ欄の分だけ増やし、13インチの画面に収める
+        assert LIVE_WIDTH == 760
+        assert 640 <= LIVE_MIN_HEIGHT <= LIVE_HEIGHT <= LIVE_MAX_DEFAULT_HEIGHT
 
     def test_previous_sizes_kept(self):
         # 従来の固定サイズを壊さない

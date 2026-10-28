@@ -10,9 +10,12 @@ NORMAL_WIDTH = 520
 COMPACT_HEIGHT = 380  # 詳細ログを隠している時
 EXPANDED_HEIGHT = 560  # 詳細ログを表示している時
 LIVE_WIDTH = 760
-LIVE_HEIGHT = 640
+# 参加者・メモ欄と要約(主役)・文字起こし(副)を並べても、案内・警告が出た時に
+# 文字起こし欄が縮む程度に収まる高さ。13インチの画面(縦 約800px 使える)に収める
+LIVE_HEIGHT = 760
+LIVE_MAX_DEFAULT_HEIGHT = 800
 LIVE_MIN_WIDTH = 600
-LIVE_MIN_HEIGHT = 520
+LIVE_MIN_HEIGHT = 640  # 参加者・メモ欄・メーター・完了表示が隠れない最小の高さ
 
 
 @dataclass(frozen=True)

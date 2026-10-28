@@ -193,3 +193,20 @@ def result_text(wav: Path, note: Path | None) -> str:
     if note is not None:
         lines.append(f"ノート: {note.name}")
     return "\n".join(lines)
+
+
+TRANSCRIPT_LINES = 3  # 文字起こし(副表示)の高さ。要約に縦幅を回すため数行だけにする
+_LINE_SPACING = 1.4  # フォントサイズに対する1行の高さの目安
+_TEXTBOX_PAD_PX = 12  # テキストボックス上下の内側余白
+
+
+def transcript_toggle_text(collapsed: bool) -> str:
+    """文字起こしの折りたたみボタンの文言"""
+    return "文字起こしを表示" if collapsed else "文字起こしを隠す"
+
+
+def textbox_height(lines: int, font_size: int) -> int:
+    """lines 行を表示するテキストボックスの要求高さ(px)"""
+    if lines <= 0 or font_size <= 0:
+        raise ValueError(f"lines と font_size は正の値が必要です: {lines}, {font_size}")
+    return round(lines * font_size * _LINE_SPACING) + _TEXTBOX_PAD_PX

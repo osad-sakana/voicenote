@@ -3,9 +3,16 @@
 from __future__ import annotations
 
 from . import theme
+from .live_context_form import ContextFormWidgets
 from .live_layout import LivePanelWidgets
 from .live_state import LiveViewState
-from .live_view_logic import BannerView, MeterView, banner_view, plan_segment_render
+from .live_view_logic import (
+    BannerView,
+    MeterView,
+    banner_view,
+    plan_segment_render,
+    transcript_toggle_text,
+)
 
 
 class LivePanel:
@@ -17,6 +24,12 @@ class LivePanel:
         self._summary = ""
         self._banner: BannerView | None = None
         self._progress_indeterminate = False
+        self._transcript_collapsed = False
+
+    @property
+    def context_form(self) -> ContextFormWidgets:
+        """参加者・メモ入力フォーム(clear() では消さない。実行をまたいで保持する)"""
+        return self._w.context_form
 
     # ──────────────── 表示/非表示 ────────────────
 
@@ -27,10 +40,28 @@ class LivePanel:
     def hide(self) -> None:
         self._w.frame.pack_forget()
 
+    @property
+    def transcript_collapsed(self) -> bool:
+        return self._transcript_collapsed
+
+    def toggle_transcript(self) -> None:
+        """文字起こし欄を折りたたむ/戻す(折りたたむと要約欄がその分広がる)"""
+        self.set_transcript_collapsed(not self._transcript_collapsed)
+
+    def set_transcript_collapsed(self, collapsed: bool) -> None:
+        w = self._w
+        self._transcript_collapsed = collapsed
+        w.transcript_toggle.configure(text=transcript_toggle_text(collapsed))
+        if collapsed:
+            w.segments_box.pack_forget()
+        elif not w.segments_box.winfo_manager():
+            w.segments_box.pack(fill="x", pady=(4, 0))
+            w.segments_box.see("end")
+
     # ──────────────── 状態 ────────────────
 
     def clear(self) -> None:
-        """次の実行に備えて区間・要約・バナー・警告・結果を消す"""
+        """次の実行に備えて区間・要約・バナー・警告・結果を消す(参加者・メモは残す)"""
         self._replace_text(self._w.segments_box, "")
         self._replace_text(self._w.summary_box, "")
         self._rendered_count = 0
@@ -88,7 +119,7 @@ class LivePanel:
             self._stop_indeterminate()
             progress.pack_forget()
         if not card.winfo_manager():
-            card.pack(fill="x", pady=(8, 0), before=self._w.body)
+            card.pack(fill="x", pady=(8, 0), before=self._w.context_form.frame)
 
     def _set_progress(self, fraction: float | None) -> None:
         progress = self._w.banner_progress
