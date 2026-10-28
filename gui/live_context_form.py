@@ -16,7 +16,11 @@ from .live_view_logic import textbox_height
 PARTICIPANTS_PLACEHOLDER = "例: 田中、佐藤、鈴木（読点・カンマ区切り）"
 MEMO_CAPTION = "メモ（議題・用語・固有名詞など。要約の参考にします）"
 _MEMO_LINES = 3  # メモ欄はおよそ3行分(スクロールで続きを書ける)
+_COMPACT_MEMO_LINES = 2  # 小さい画面では2行分にして要約欄に縦幅を回す
+_CLEAR_PAD_TOP = 6
+_COMPACT_CLEAR_PAD_TOP = 2  # 左列(参加者+クリア)がメモ欄の高さの下限になるので詰める
 _WRAP_PX = 560
+_MEMO_FONT_SIZE = 13
 
 
 @dataclass(frozen=True)
@@ -36,6 +40,13 @@ class ContextFormWidgets:
     def clear_inputs(self) -> None:
         self.participants_entry.delete(0, "end")
         self.memo_box.delete("1.0", "end")
+
+    def set_compact(self, compact: bool) -> None:
+        """小さい画面向けに縦を詰める(メモ欄2行・クリアボタン上の余白を小さく)"""
+        lines = _COMPACT_MEMO_LINES if compact else _MEMO_LINES
+        self.memo_box.configure(height=textbox_height(lines, _MEMO_FONT_SIZE))
+        pad = _COMPACT_CLEAR_PAD_TOP if compact else _CLEAR_PAD_TOP
+        self.clear_btn.grid_configure(pady=(pad, 0))
 
     def show_notice(self, text: str | None) -> None:
         label = self.notice_label
@@ -77,7 +88,7 @@ def build_context_form(
         command=on_clear,
         **theme.SECONDARY_STYLE,
     )
-    clear_btn.grid(row=2, column=0, sticky="sw", pady=(6, 0))
+    clear_btn.grid(row=2, column=0, sticky="sw", pady=(_CLEAR_PAD_TOP, 0))
     _caption(frame, MEMO_CAPTION).grid(row=0, column=1, sticky="w", padx=(10, 0))
     memo = _build_memo_box(frame, on_change)
     memo.grid(row=1, column=1, rowspan=2, sticky="nsew", padx=(10, 0), pady=(2, 0))
@@ -120,10 +131,10 @@ def _build_participants_entry(frame, on_change: Callable[[], None]) -> ctk.CTkEn
 def _build_memo_box(frame, on_change: Callable[[], None]) -> ctk.CTkTextbox:
     box = ctk.CTkTextbox(
         frame,
-        height=textbox_height(_MEMO_LINES, 13),
+        height=textbox_height(_MEMO_LINES, _MEMO_FONT_SIZE),
         wrap="char",
         corner_radius=theme.CONTROL_RADIUS,
-        font=theme.font(13),
+        font=theme.font(_MEMO_FONT_SIZE),
         fg_color=theme.CARD_BG,
         text_color=theme.TEXT,
         border_width=1,

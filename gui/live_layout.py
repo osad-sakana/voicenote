@@ -22,6 +22,20 @@ _WRAP_PX = 560  # バナー・結果の折り返し幅(ウィンドウ最小幅�
 _TOGGLE_WIDTH = 120  # 最小幅(自動で隠した時の長い文言では文字に合わせて広がる)
 SUMMARY_PAD_TOP = 4
 TRANSCRIPT_PAD_TOP = 8
+
+
+@dataclass(frozen=True)
+class PanelGaps:
+    """縦の間隔(px)。section: バナー・参加者メモ・要約欄の上 / warning・result: 下端の各行の上"""
+
+    section: int
+    warning: int
+    result: int
+
+
+NORMAL_GAPS = PanelGaps(section=8, warning=4, result=6)
+# 小さい画面(gui/mode_logic.live_screen_compact)では詰めて要約欄に縦幅を回す
+COMPACT_GAPS = PanelGaps(section=4, warning=2, result=2)
 # body の grid の行番号
 _ROW_HEADER, _ROW_SUMMARY, _ROW_TRANSCRIPT = 0, 1, 2
 
@@ -105,11 +119,11 @@ def build_live_panel(parent, commands: LivePanelCommands) -> LivePanelWidgets:
     frame = ctk.CTkFrame(parent, fg_color="transparent")
     banner_card, banner_label, banner_progress = _build_banner(frame)
     form = build_context_form(frame, commands.on_context_change, commands.on_context_clear)
-    form.frame.pack(fill="x", pady=(8, 0))
+    form.frame.pack(fill="x", pady=(NORMAL_GAPS.section, 0))
     meter = _build_meter_row(frame)
     meter[0].pack(side="bottom", fill="x", pady=(6, 0))
     body, header, summary_box, transcript = _build_body(frame, commands.on_toggle_transcript)
-    body.pack(fill="both", expand=True, pady=(8, 0))
+    body.pack(fill="both", expand=True, pady=(NORMAL_GAPS.section, 0))
     warning_label = ctk.CTkLabel(
         frame,
         text="",
@@ -165,6 +179,8 @@ def _build_body(frame, on_toggle: Callable[[], None]):
     """
     body = ctk.CTkFrame(frame, fg_color="transparent")
     body.grid_columnconfigure(0, weight=1)
+    # minsize は Tk の px。CustomTkinter の拡大率は macOS 前提の倍率1として扱う
+    # (ScalingTracker の拡大率には追従しない)
     body.grid_rowconfigure(
         _ROW_SUMMARY,
         weight=1,

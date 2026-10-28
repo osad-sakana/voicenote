@@ -69,14 +69,33 @@ def _has_long_name(text: str | None) -> bool:
     )
 
 
-def limit_notice(participants_text: str | None, memo_text: str | None) -> str | None:
-    """上限を超えた入力への案内文。超えていなければ None(本文は含めない)"""
+def limit_notice(
+    participants_text: str | None, memo_text: str | None, *, compact: bool = False
+) -> str | None:
+    """上限を超えた入力への案内文。超えていなければ None(本文は含めない)
+
+    compact: 小さい画面向けに1行へ省略する(要約欄に縦幅を回すため)
+    """
+    over_count = count_participants(participants_text) > MAX_PARTICIPANTS
+    long_name = _has_long_name(participants_text)
+    memo_over = build_context(None, memo_text).memo_truncated
+    if compact:
+        limits = [
+            label
+            for label, over in (
+                (f"参加者{MAX_PARTICIPANTS}人", over_count),
+                (f"名前{MAX_PARTICIPANT_CHARS}文字", long_name),
+                (f"メモ{MAX_MEMO_CHARS}文字", memo_over),
+            )
+            if over
+        ]
+        return f"上限を超えた分は要約に使いません（{'・'.join(limits)}）" if limits else None
     notices = []
-    if count_participants(participants_text) > MAX_PARTICIPANTS:
+    if over_count:
         notices.append(f"参加者は先頭{MAX_PARTICIPANTS}人だけを要約に使います")
-    if _has_long_name(participants_text):
+    if long_name:
         notices.append(f"参加者名は1人{MAX_PARTICIPANT_CHARS}文字までに切り詰めます")
-    if build_context(None, memo_text).memo_truncated:
+    if memo_over:
         notices.append(f"メモは先頭{MAX_MEMO_CHARS}文字だけを要約に使います")
     return " / ".join(notices) if notices else None
 
@@ -131,6 +150,7 @@ class ContextSync:
     read_inputs: (参加者の文字列, メモの文字列) を返す
     push: LiveWorkflow.update_context 相当(None は空)
     on_notice: 上限超過の案内文(無ければ None)を表示する
+    compact_notice: 案内文を1行に省略する(小さい画面で要約欄に縦幅を回すため)
     """
 
     def __init__(
@@ -142,8 +162,10 @@ class ContextSync:
         schedule: Schedule,
         cancel: Cancel,
         delay_ms: int = DEBOUNCE_MS,
+        compact_notice: bool = False,
     ):
         self._read_inputs = read_inputs
+        self._compact_notice = compact_notice
         self._push = push
         self._on_notice = on_notice
         self._last: LiveContext | None = None
@@ -181,7 +203,7 @@ class ContextSync:
 
     def _sync(self, *, force: bool = False) -> None:
         participants, memo = self._read_inputs()
-        self._on_notice(limit_notice(participants, memo))
+        self._on_notice(limit_notice(participants, memo, compact=self._compact_notice))
         context = build_context(participants, memo)
         if (force or should_push(self._last, context)) and self._send(context):
             self._last = context

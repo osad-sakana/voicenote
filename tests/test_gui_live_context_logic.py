@@ -202,6 +202,59 @@ class TestDebouncer:
             Debouncer(sched.schedule, sched.cancel, lambda: None, delay_ms=delay)
 
 
+class TestCompactLimitNotice:
+    """小さい画面(compact)では、複数の上限案内を1行に省略する"""
+
+    _ALL_OVER = (
+        "、".join(f"人{i}" for i in range(MAX_PARTICIPANTS + 5))
+        + "、"
+        + "あ" * (MAX_PARTICIPANT_CHARS + 1),
+        "m" * (MAX_MEMO_CHARS + 1),
+    )
+
+    def test_compact_all_three_is_short(self):
+        notice = limit_notice(*self._ALL_OVER, compact=True)
+        assert notice is not None
+        # 幅 560px・12pt で1行に収まる長さ(全角換算 40 文字以内)
+        assert len(notice) <= 40
+        assert f"{MAX_PARTICIPANTS}人" in notice
+        assert f"{MAX_PARTICIPANT_CHARS}文字" in notice
+        assert f"{MAX_MEMO_CHARS}文字" in notice
+
+    def test_compact_lists_only_exceeded_limits(self):
+        notice = limit_notice("", "m" * (MAX_MEMO_CHARS + 1), compact=True)
+        assert notice is not None
+        assert f"{MAX_MEMO_CHARS}文字" in notice
+        assert "人" not in notice
+
+    def test_compact_none_within_limits(self):
+        assert limit_notice("田中", "メモ", compact=True) is None
+
+    def test_compact_does_not_include_input_text(self):
+        notice = limit_notice("秘密太郎、" + _names(MAX_PARTICIPANTS + 1), "機密", compact=True)
+        assert notice is not None
+        assert "秘密" not in notice and "機密" not in notice
+
+    def test_default_is_full_text(self):
+        full = limit_notice(*self._ALL_OVER)
+        assert full is not None
+        assert full.count(" / ") == 2
+
+    def test_context_sync_uses_compact_notice(self):
+        notices: list = []
+        sched = FakeScheduler()
+        sync = ContextSync(
+            read_inputs=lambda: self._ALL_OVER,
+            push=lambda _ctx: None,
+            on_notice=notices.append,
+            schedule=sched.schedule,
+            cancel=sched.cancel,
+            compact_notice=True,
+        )
+        sync.flush()
+        assert notices == [limit_notice(*self._ALL_OVER, compact=True)]
+
+
 class SyncHarness:
     def __init__(self, participants="", memo=""):
         self.inputs = (participants, memo)

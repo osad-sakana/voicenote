@@ -13,6 +13,7 @@ from gui.mode_logic import (
     NORMAL_WIDTH,
     SCREEN_RESERVED_HEIGHT,
     fit_to_screen,
+    live_screen_compact,
     normal_exec_spec,
     other_mode_rejection,
     resize_on_log_toggle,
@@ -151,3 +152,21 @@ class TestFitToScreen:
     def test_normal_modes_unchanged_on_normal_screens(self, mode):
         spec = window_spec(mode, log_visible=True)
         assert fit_to_screen(spec, 900) is spec
+
+
+class TestLiveScreenCompact:
+    """画面に合わせてライブ窓を縮めた時だけ、他の領域を詰めて要約欄を優先する"""
+
+    def test_compact_on_13inch_standard_screen(self):
+        assert live_screen_compact(900) is True
+
+    def test_not_compact_when_default_height_fits(self):
+        assert live_screen_compact(LIVE_HEIGHT + SCREEN_RESERVED_HEIGHT) is False
+        assert live_screen_compact(1050) is False
+
+    def test_compact_just_below_default(self):
+        assert live_screen_compact(LIVE_HEIGHT + SCREEN_RESERVED_HEIGHT - 1) is True
+
+    @pytest.mark.parametrize("height", [0, -1])
+    def test_unknown_screen_is_not_compact(self, height):
+        assert live_screen_compact(height) is False

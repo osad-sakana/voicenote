@@ -116,8 +116,12 @@ class App(TkinterDnD.DnDWrapper, ctk.CTk):
         style = theme.DANGER_STYLE if danger else theme.PRIMARY_STYLE
         self._exec_btn.configure(text=text, state="normal", **style)
 
+    def screen_height(self) -> int:
+        """画面の縦(pt)。Tk の winfo_screenheight はメイン画面の論理高さで、窓がある画面とは限らない"""
+        return self.winfo_screenheight()
+
     def _apply_window(self, spec: WindowSpec):
-        spec = fit_to_screen(spec, self.winfo_screenheight())
+        spec = fit_to_screen(spec, self.screen_height())
         self.minsize(spec.min_width, spec.min_height)
         self.geometry(spec.geometry)
         self.resizable(spec.resizable, spec.resizable)
