@@ -6,6 +6,7 @@ frontmatter は Obsidian の規約に準拠しているが、他の Markdown ベ
 そのまま利用できる。
 """
 
+import json
 import re
 from datetime import datetime
 from pathlib import Path
@@ -76,7 +77,24 @@ def _write_new_file(save_folder: Path, base: str, content: str) -> Path:
             n += 1
 
 
-def save_live_note(save_folder: Path, body: str, audio_file: Path | None = None) -> Path:
+def _participants_yaml(participants: tuple[str, ...]) -> str:
+    """frontmatter の participants 行(空なら空文字)
+
+    各要素は JSON 文字列(YAML のダブルクォート文字列としても有効)で書き、`:` `#` `- `
+    や yes/null のような値・改行を含む名前でも型が変わったり構造が壊れたりしないようにする。
+    """
+    if not participants:
+        return ""
+    items = "".join(f"  - {json.dumps(name, ensure_ascii=False)}\n" for name in participants)
+    return f"participants:\n{items}"
+
+
+def save_live_note(
+    save_folder: Path,
+    body: str,
+    audio_file: Path | None = None,
+    participants: tuple[str, ...] = (),
+) -> Path:
     """ライブ文字起こし結果を `save_folder/{開始時刻}_live.md` として保存する。
 
     Args:
@@ -84,6 +102,7 @@ def save_live_note(save_folder: Path, body: str, audio_file: Path | None = None)
         body: ノート本文（frontmatter を除く Markdown）
         audio_file: 対応する録音 WAV。指定時はその stem（開始時刻）をノート名に使い、
             未指定なら現在時刻を使う。同名ファイルがあれば `_2`, `_3`, ... を付ける
+        participants: 参加者名。空でなければ frontmatter に `participants:` のリストとして書く
 
     Returns:
         保存されたファイルのパス
@@ -99,7 +118,7 @@ type: live-transcription
 tags:
   - recording
   - live
----
+{_participants_yaml(tuple(participants))}---
 {body}
 """
     try:

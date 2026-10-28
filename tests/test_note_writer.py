@@ -105,3 +105,45 @@ class TestSaveLiveNoteNamedAfterWav:
     def test_arbitrary_wav_name_uses_stem(self, tmp_path: Path):
         saved = save_live_note(tmp_path, "本文", audio_file=Path("/x/meeting.wav"))
         assert saved.name == "meeting_live.md"
+
+
+class TestSaveLiveNoteParticipants:
+    """frontmatter の participants(参加者)。空なら従来と同一の frontmatter"""
+
+    @staticmethod
+    def _frontmatter(content: str) -> str:
+        return content.split("---\n")[1]
+
+    def test_without_participants_frontmatter_is_unchanged(self, tmp_path: Path):
+        content = save_live_note(tmp_path, "本文").read_text(encoding="utf-8")
+        fm = self._frontmatter(content)
+        assert "participants" not in fm
+        assert fm.endswith("type: live-transcription\ntags:\n  - recording\n  - live\n")
+
+    def test_empty_participants_same_as_omitted(self, tmp_path: Path):
+        a = save_live_note(tmp_path / "a", "本文", participants=()).read_text(encoding="utf-8")
+        b = save_live_note(tmp_path / "b", "本文").read_text(encoding="utf-8")
+        assert a.split("\n", 2)[2] == b.split("\n", 2)[2]  # created 行以外が一致
+
+    def test_participants_are_listed(self, tmp_path: Path):
+        saved = save_live_note(tmp_path, "本文", participants=("田中", "佐藤"))
+        fm = self._frontmatter(saved.read_text(encoding="utf-8"))
+        assert 'participants:\n  - "田中"\n  - "佐藤"\n' in fm
+        assert fm.index("participants:") > fm.index("type: live-transcription")
+
+    def test_participants_are_yaml_safe_quoted(self, tmp_path: Path):
+        names = ("田中: 部長", "#1", "- x", "yes", "null", 'a"b\\c')
+        saved = save_live_note(tmp_path, "本文", participants=names)
+        fm = self._frontmatter(saved.read_text(encoding="utf-8"))
+        assert '  - "田中: 部長"\n' in fm
+        assert '  - "#1"\n' in fm
+        assert '  - "- x"\n' in fm
+        assert '  - "yes"\n' in fm
+        assert '  - "null"\n' in fm
+        assert '  - "a\\"b\\\\c"\n' in fm
+
+    def test_participants_cannot_break_frontmatter(self, tmp_path: Path):
+        saved = save_live_note(tmp_path, "本文", participants=("x\n---\ntype: evil",))
+        content = saved.read_text(encoding="utf-8")
+        assert content.count("\n---\n") == 1
+        assert '  - "x\\n---\\ntype: evil"\n' in content

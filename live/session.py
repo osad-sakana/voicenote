@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from live.chunk_queue import BoundedChunkQueue
+from live.context import LiveContext
 from live.framer import Framer
 from live.hallucination import is_hallucination
 from live.segment_queue import DropOldestQueue
@@ -59,6 +60,7 @@ class LiveSession:
         backend: ChatBackend | None,
         callbacks: LiveCallbacks = LiveCallbacks(),
         clock: Callable[[], float] = time.monotonic,
+        context: LiveContext | None = None,
     ):
         """
         Args:
@@ -68,6 +70,7 @@ class LiveSession:
             backend: 要約用のチャットLLM。None なら要約しない
             callbacks: 通知先
             clock: 要約の実行間隔判定に使う時刻関数(stop の timeout には使わない)
+            context: 要約に渡す初期の参考情報(参加者・メモ)。None なら参考情報なし
         """
         self._settings = settings
         self._engine = engine
@@ -75,7 +78,7 @@ class LiveSession:
         self._callbacks = callbacks
         self._chunks = BoundedChunkQueue(settings.chunk_queue_size)
         self._segments: DropOldestQueue[Segment] = DropOldestQueue(settings.segment_queue_size)
-        self._summarizer = self._create_summarizer(backend, clock)
+        self._summarizer = self._create_summarizer(backend, clock, context)
         self._lock = threading.Lock()
         self._backlog_samples = 0  # 整数で数え、浮動小数の誤差を溜めない
         self._dropped_segments = 0
@@ -89,7 +92,7 @@ class LiveSession:
         self._threads: dict[str, threading.Thread] = {}
         self._result: LiveResult | None = None
 
-    def _create_summarizer(self, backend, clock) -> RollingSummarizer | None:
+    def _create_summarizer(self, backend, clock, context) -> RollingSummarizer | None:
         if backend is None:
             return None
         return RollingSummarizer(
@@ -99,6 +102,7 @@ class LiveSession:
             max_backlog_sec=self._settings.max_backlog_sec,
             clock=clock,
             on_warning=lambda msg: _safe_call(self._callbacks.on_warning, msg),
+            context=context,
         )
 
     # ------------------------------------------------------------ 公開API
@@ -113,6 +117,16 @@ class LiveSession:
     def dropped_chunks(self) -> int:
         """チャンクキューが満杯のため破棄された録音チャンク数"""
         return self._chunks.dropped
+
+    def set_context(self, context: LiveContext | None) -> None:
+        """要約の参考情報(参加者・メモ)を差し替える。スレッドセーフで、次回の要約から反映する
+
+        参考情報の変更だけでは要約を起動しない。要約しないセッション(backend=None)では何もしない。
+        """
+        if self._summarizer is not None:
+            self._summarizer.set_context(context)
+        elif context is not None and not isinstance(context, LiveContext):
+            raise TypeError(f"context は LiveContext が必要です: {type(context).__name__}")
 
     def start(self) -> None:
         """ワーカースレッドを起動する。2回目以降は RuntimeError"""
