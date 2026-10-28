@@ -25,6 +25,7 @@ from typing import Protocol
 import numpy as np
 
 from live.asr_hint import HINT_MIN_SEGMENT_SEC, is_hint_echo
+from live.full_summary import full_summary_timeout
 from live.hallucination import is_hallucination
 from live.note import format_timestamp
 from live.session_models import LiveSegment, LiveSettings
@@ -35,6 +36,7 @@ REFINE_ENGINE = "mlx"
 REFINE_MAX_RTF = 1.0  # 期限 = 録音長 × これ + 読み込みの猶予
 REFINE_LOAD_GRACE_SEC = 300.0
 REFINE_SAMPLE_RATE = 16000
+REFINE_ASR_IDLE_TIMEOUT_SEC = 30.0  # 再文字起こし前にライブの asr スレッドの終了を待つ上限
 WINDOW_TARGET_SEC = 60.0  # 1窓の目安。キャンセル・進捗の粒度になる
 WINDOW_SEARCH_SEC = 5.0  # 切れ目を目安の前後この範囲で探す
 QUIET_PROBE_SEC = 0.1  # 静かさを測る単位
@@ -64,8 +66,13 @@ class RefineResult:
     elapsed: float
 
 
-def decide_refine(settings: LiveSettings, effective_engine: str, is_cached: bool) -> RefineDecision:
-    """設定・実際に動いたエンジン・モデルの取得状況から、再文字起こしを行うか決める"""
+def decide_refine(
+    settings: LiveSettings, effective_engine: str, is_cached: bool, *, fetching: bool = False
+) -> RefineDecision:
+    """設定・実際に動いたエンジン・モデルの取得状況から、再文字起こしを行うか決める
+
+    fetching はバックグラウンドで高精度モデルを取得中か(取得中は未取得と同じくスキップ)。
+    """
     if not settings.refine_enabled:
         return RefineDecision(False, "")
     if effective_engine != REFINE_ENGINE:
@@ -73,6 +80,11 @@ def decide_refine(settings: LiveSettings, effective_engine: str, is_cached: bool
             False,
             "高精度の再文字起こしは mlx エンジン使用時のみ行います"
             f"（今回は {effective_engine} で動作したためスキップしました）",
+        )
+    if fetching:
+        return RefineDecision(
+            False,
+            f"高精度モデル {settings.refine_model} を取得中のため、再文字起こしをスキップしました",
         )
     if not is_cached:
         return RefineDecision(
@@ -112,7 +124,12 @@ def plan_windows(
     """音声を約 target_sec 秒の窓に分ける(純関数)。切れ目は前後 search_sec 内で最も静かな位置
 
     残りが target_sec + search_sec 以下なら最後の窓にまとめる。窓は隙間なく連続する。
+
+    Raises:
+        ValueError: num_samples が負・sample_rate / target_sec が正でない・
+            search_sec が QUIET_PROBE_SEC 未満か target_sec 以上(切れ目が前へ戻り終わらなくなる)
     """
+    _validate_window_args(num_samples, sample_rate, target_sec, search_sec)
     target = int(target_sec * sample_rate)
     search = int(search_sec * sample_rate)
     probe = max(1, int(QUIET_PROBE_SEC * sample_rate))
@@ -125,6 +142,54 @@ def plan_windows(
     if start < num_samples:
         windows.append((start, num_samples))
     return tuple(windows)
+
+
+def _validate_window_args(
+    num_samples: int, sample_rate: int, target_sec: float, search_sec: float
+) -> None:
+    if num_samples < 0:
+        raise ValueError(f"num_samples は 0 以上が必要です: {num_samples}")
+    if sample_rate <= 0 or target_sec <= 0:
+        raise ValueError(
+            f"sample_rate と target_sec は正の値が必要です: {sample_rate}, {target_sec}"
+        )
+    if not QUIET_PROBE_SEC <= search_sec < target_sec:
+        raise ValueError(
+            f"search_sec は {QUIET_PROBE_SEC} 以上 target_sec 未満が必要です: {search_sec}"
+        )
+
+
+def summarize_refined(
+    backend,
+    segments: tuple[LiveSegment, ...],
+    context,
+    fallback: str,
+    *,
+    summarize: Callable[..., str | None],
+    cancel: CancelFlag | None = None,
+    clock: Callable[[], float] = time.monotonic,
+) -> str:
+    """高精度版の全文から要約を作り直す(CLI・GUI 共通)。作れなければ fallback(速報版の要約)
+
+    上限時間は LLM の呼び出し回数(塊数 + 統合1回)に比例させる(full_summary_timeout)。
+    失敗は型名だけをログに出す(本文・参考情報は出さない)。
+    """
+    if backend is None or not segments:
+        return fallback
+    texts = tuple(s.text for s in segments)
+    try:
+        summary = summarize(
+            backend,
+            texts,
+            context,
+            deadline=clock() + full_summary_timeout(texts),
+            cancel=cancel,
+            clock=clock,
+        )
+    except Exception as e:
+        _logger.warning("高精度版からの要約に失敗しました: %s", type(e).__name__)
+        summary = None
+    return summary or fallback
 
 
 def _read_chunks(path: Path) -> tuple[bytes | None, int | None, int | None]:

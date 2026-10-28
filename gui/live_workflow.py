@@ -32,6 +32,7 @@ from live.context import LiveContext
 from live.level_meter import InputLevelAssessment, LevelMeter, assess_input_level, tee
 from live.model_fetch import describe_fetch_error
 from live.note import render_live_note
+from live.refine_fetch import BackgroundModelFetch
 from live.session_models import LiveCallbacks, LiveResult, LiveSettings
 from recorder import STREAM_STOP_TIMEOUT_SEC
 
@@ -143,6 +144,10 @@ class LiveWorkflow(RefineLifecycle):
         self._engine_lock_timeout = engine_lock_timeout
         self._lock = threading.RLock()
         self._engine_lock = threading.Lock()  # 実行をまたいで asr を直列化する
+        # 高精度モデルのバックグラウンド取得(実行をまたいで二重取得を避ける)
+        self._refine_fetch = BackgroundModelFetch(
+            thread_factory=lambda **kw: self._thread_factory(**kw)
+        )
         self._state = LiveViewState()
         self._gen = 0
         self._run: _Run | None = None
@@ -499,8 +504,6 @@ class LiveWorkflow(RefineLifecycle):
         self._check_cancel(run)
         self._ensure_model(settings.engine, settings.model, run)
         self._check_cancel(run)
-        settings = self._ensure_refine_model(settings, run)
-        self._check_cancel(run)
         backend = self._prepare_backend(settings, run)
         detector = build_vad(
             settings,
@@ -534,6 +537,7 @@ class LiveWorkflow(RefineLifecycle):
         sink = tee(meter.feed, session.feed)
         self._start_recorder(run, self._deps.recorder_factory(run.device_id, run.dest, sink))
         self._safe(self._callbacks.on_recording_started)
+        self._start_refine_fetch(settings)  # 録音開始後に取得する(録音の開始を待たせない)
         self._safe(self._callbacks.on_log, f"ライブ録音開始 (デバイス: {run.device_label})")
 
     @staticmethod
@@ -681,13 +685,11 @@ class LiveWorkflow(RefineLifecycle):
     def _drain_worker(self, run: _Run, session, wav: Path) -> None:
         """session.stop() でドレインし、ノートを保存する。中断されていれば結果を捨てる
 
-        再文字起こしを予定していれば全文要約は省く(LLM とメモリを奪い合わないため)。
+        再文字起こしを行うかは、ドレイン後(実際に動いたエンジンが確定した後)に決める。
         """
-        refine = self._plan_refine()
         try:
-            result: LiveResult | None = session.stop(
-                timeout=self._session_stop_timeout, rebuild_summary=not refine
-            )
+            # 再文字起こしの有無に関係なく全文要約まで作る(再文字起こしより前に終わる)
+            result: LiveResult | None = session.stop(timeout=self._session_stop_timeout)
         except Exception:
             _logger.error("session.stop で例外:\n%s", traceback.format_exc())
             result = None
@@ -700,7 +702,7 @@ class LiveWorkflow(RefineLifecycle):
             state = self._state
         if result is None:
             result = to_live_result(state, dropped_chunks=_dropped_chunks(session), complete=False)
-        self._save_note(run, result, wav, refine=refine)
+        self._save_note(run, result, wav, refine=self._plan_refine())
 
     def _render_and_save(self, run: _Run, result: LiveResult, wav: Path) -> Path:
         config = run.config

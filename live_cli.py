@@ -42,7 +42,15 @@ from live.bootstrap import (  # noqa: F401
 from live.full_summary import summarize_full
 from live.local_llm import LocalLLMClient, probe
 from live.note import external_send_warning, render_live_note
-from live.refine import REFINE_ENGINE, decide_refine, format_refine_progress, refine_wav
+from live.refine import (
+    REFINE_ASR_IDLE_TIMEOUT_SEC,
+    REFINE_ENGINE,
+    decide_refine,
+    format_refine_progress,
+    refine_wav,
+    summarize_refined,
+)
+from live.refine_fetch import BackgroundModelFetch
 from live.session import LiveCallbacks, LiveSession, LiveSettings
 from live.session_models import LiveResult, RefinedTranscript
 from live.vad import create_vad, vad_kind
@@ -56,10 +64,10 @@ SESSION_STOP_TIMEOUT_SEC = 120.0
 ERROR_STOP_TIMEOUT_SEC = 2.0
 PROBE_TIMEOUT_SEC = 3.0
 MLX_INSTALL_HINT = "uv sync --extra live-mlx"
-REFINE_ASR_IDLE_TIMEOUT_SEC = 30.0  # 再文字起こし前に asr スレッドの終了を待つ上限
-REFINE_SUMMARY_TIMEOUT_SEC = 180.0  # 高精度版からの要約の上限
 REFINE_POLL_SEC = 0.25  # 再文字起こし中に Ctrl+C を受けるための join 間隔
 REFINE_PROGRESS_PRINT_SEC = 10.0  # 進捗表示の間隔
+# 高精度モデルのバックグラウンド取得スレッドの生成(テストで差し替える)
+_fetch_thread_factory = threading.Thread
 
 
 def _engine_api():
@@ -141,8 +149,17 @@ def _make_callbacks(view: LiveView) -> LiveCallbacks:
     )
 
 
-def _record(session: LiveSession, view: LiveView, device: str | None, dest_dir: Path) -> Path:
-    """Rich Live で画面を更新しながら録音する。戻った時点で WAV は確定・ストリームは停止済み"""
+def _record(
+    session: LiveSession,
+    view: LiveView,
+    device: str | None,
+    dest_dir: Path,
+    on_recording=lambda: None,
+) -> Path:
+    """Rich Live で画面を更新しながら録音する。戻った時点で WAV は確定・ストリームは停止済み
+
+    on_recording は録音が始まった時に呼ぶ(高精度モデルのバックグラウンド取得の開始など)。
+    """
 
     def on_start(device_name: str) -> None:
         console.print(
@@ -153,6 +170,7 @@ def _record(session: LiveSession, view: LiveView, device: str | None, dest_dir: 
                 border_style="green",
             )
         )
+        on_recording()
 
     def on_stop() -> None:
         view.set_status("録音を停止しています...")
@@ -182,8 +200,8 @@ def _settings_or_exit(config: VoiceNoteConfig) -> LiveSettings:
 def run_live(config: VoiceNoteConfig, device: str | None, dest_dir: Path) -> None:
     """ライブ文字起こしを実行し、録音 WAV とライブノートを保存する"""
     engine, settings = _create_engine(_settings_or_exit(config))
-    settings = _prepare_refine_model(settings)
     backend = _prepare_backend(settings)
+    fetch = BackgroundModelFetch(thread_factory=lambda **kw: _fetch_thread_factory(**kw))
     view = LiveView()
     session = LiveSession(
         settings,
@@ -195,30 +213,36 @@ def run_live(config: VoiceNoteConfig, device: str | None, dest_dir: Path) -> Non
     # モデル読み込み中も録音チャンクはキューに溜まるよう、録音より先に開始する
     session.start()
     try:
-        audio_file = _record(session, view, device, dest_dir)
+        audio_file = _record(
+            session,
+            view,
+            device,
+            dest_dir,
+            on_recording=lambda: _start_refine_fetch(settings, fetch),
+        )
     except (ValueError, RuntimeError) as e:
         session.stop(timeout=ERROR_STOP_TIMEOUT_SEC)
         _fatal(str(e))
     # ここに到達した時点で「WAV確定 → ストリーム停止」は完了済み。最後にライブ側をドレインする
     send_warning = external_send_warning(config.transcription_mode, config.format_mode)
-    job = _RefineJob(settings, engine, backend, session, audio_file, send_warning)
-    refine = _plan_refine(job)
-    result = _drain(session, rebuild_summary=not refine)
+    result = _drain(session)
     if result is None:
         _print_interrupted(audio_file, send_warning)
         return
     note_path = _save_fast_note(config, result, audio_file, send_warning)
-    refined = refine and _refine_and_overwrite(job, result, note_path)
+    job = _RefineJob(settings, engine, backend, session, audio_file, send_warning, fetch)
+    refined = _refine_phase(job, result, note_path)
     _print_done(audio_file, note_path, send_warning, refined=refined)
 
 
-def _drain(session: LiveSession, *, rebuild_summary: bool) -> LiveResult | None:
+def _drain(session: LiveSession) -> LiveResult | None:
     """残り区間を文字起こしして結果を返す。Ctrl+C なら None"""
     console.print(
         "[cyan]残りの区間を文字起こしし、最終要約を作成しています...（Ctrl+C で中断）[/cyan]"
     )
     try:
-        return session.stop(timeout=SESSION_STOP_TIMEOUT_SEC, rebuild_summary=rebuild_summary)
+        # 再文字起こしの有無に関係なく全文要約まで作る(再文字起こしより前に終わるのでメモリは競合しない)
+        return session.stop(timeout=SESSION_STOP_TIMEOUT_SEC)
     except KeyboardInterrupt:
         # record_audio は戻る前に SIGINT ハンドラを復元するため、ここでの Ctrl+C は
         # KeyboardInterrupt になる。WAV は確定済みなのでノート生成だけを諦める
@@ -250,6 +274,7 @@ class _RefineJob:
     session: LiveSession
     audio_file: Path
     send_warning: str | None
+    fetch: BackgroundModelFetch
 
 
 def _refine_model_cached(settings: LiveSettings) -> bool:
@@ -261,50 +286,38 @@ def _refine_model_cached(settings: LiveSettings) -> bool:
     return repo is None or model_fetch.is_cached(repo)
 
 
-def _print_fetch_progress(model: str):
-    """ダウンロード進捗を間引いて表示する関数を返す"""
-    last = {"at": None}
+def _start_refine_fetch(settings: LiveSettings, fetch: BackgroundModelFetch) -> None:
+    """再文字起こしを予定していて高精度モデルが未取得なら、録音中にバックグラウンドで取得する
 
-    def on_progress(done: int, total: int) -> None:
-        now = time.monotonic()
-        finished = total > 0 and done >= total
-        if last["at"] is not None and now - last["at"] < REFINE_PROGRESS_PRINT_SEC and not finished:
-            return
-        last["at"] = now
-        percent = f"（{min(100, done * 100 // total)}%）" if total > 0 else ""
-        _notify(f"高精度モデル {model} をダウンロードしています... {done // 1_000_000} MB{percent}")
-
-    return on_progress
-
-
-def _prepare_refine_model(settings: LiveSettings) -> LiveSettings:
-    """再文字起こしを予定していれば、録音前に高精度モデルを取得する
-
-    取得できなければ警告し、再文字起こしなし(refine_enabled=False)で続行する。
+    録音の開始は待たせない。失敗は警告だけ(型名のみ)で、その回の再文字起こしはしない。
     """
     if not settings.refine_enabled or settings.engine != REFINE_ENGINE:
-        return settings
-    if _refine_model_cached(settings):
-        return settings
+        return
     model = settings.refine_model
-    console.print(f"[cyan]高精度モデル {model} を取得します（初回のみ）[/cyan]")
-    try:
-        repo = model_fetch.resolve_repo(REFINE_ENGINE, model)
-        model_fetch.fetch(repo, _print_fetch_progress(model))
-    except Exception as e:
-        _warn(
-            f"{model_fetch.describe_fetch_error(e).message}高精度の再文字起こしなしで続行します。"
+    status = fetch.start(
+        model_fetch,
+        REFINE_ENGINE,
+        model,
+        on_failed=lambda msg: _warn(f"{msg}。高精度の再文字起こしなしで続行します"),
+    )
+    if status == "started":
+        _notify(
+            f"高精度モデル {model} をバックグラウンドで取得しています"
+            "（取得が終わる前に停止した場合、再文字起こしはしません）"
         )
-        return replace(settings, refine_enabled=False)
-    return settings
 
 
 def _plan_refine(job: _RefineJob) -> bool:
-    """停止前に、再文字起こしを行うか決める(行わない理由があれば表示する)"""
+    """停止後に、再文字起こしを行うか決める(行わない理由があれば表示する)"""
+    settings = job.settings
+    fetching = settings.refine_enabled and job.fetch.is_fetching(
+        model_fetch, REFINE_ENGINE, settings.refine_model
+    )
     decision = decide_refine(
-        job.settings,
-        effective_engine_name(job.engine, job.settings),
-        job.settings.refine_enabled and _refine_model_cached(job.settings),
+        settings,
+        effective_engine_name(job.engine, settings),
+        settings.refine_enabled and not fetching and _refine_model_cached(settings),
+        fetching=fetching,
     )
     if decision.reason:
         _warn(decision.reason)
@@ -390,16 +403,20 @@ def _run_refine(job: _RefineJob):
 
 def _refined_summary(job: _RefineJob, refined: RefinedTranscript, fallback: str) -> str:
     """高精度版の全文から要約を作り直す。作れなければ速報版の要約"""
-    if job.backend is None or not refined.segments:
-        return fallback
-    console.print("[cyan]高精度版の全文から要約を作り直しています...[/cyan]")
-    summary = summarize_full(
-        job.backend,
-        tuple(s.text for s in refined.segments),
-        None,
-        deadline=time.monotonic() + REFINE_SUMMARY_TIMEOUT_SEC,
+    if job.backend is not None and refined.segments:
+        console.print("[cyan]高精度版の全文から要約を作り直しています...[/cyan]")
+    return summarize_refined(
+        job.backend, refined.segments, None, fallback, summarize=summarize_full
     )
-    return summary or fallback
+
+
+def _refine_phase(job: _RefineJob, result: LiveResult, note_path: Path) -> bool:
+    """停止後の再文字起こし全体。途中の Ctrl+C は速報版を残して正常に終える"""
+    try:
+        return _plan_refine(job) and _refine_and_overwrite(job, result, note_path)
+    except KeyboardInterrupt:
+        _warn("高精度の再文字起こしを中断しました。速報版のノートを残します")
+        return False
 
 
 def _refine_and_overwrite(job: _RefineJob, result: LiveResult, note_path: Path) -> bool:

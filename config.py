@@ -282,7 +282,7 @@ def configure_live_interactive() -> dict:
 
 
 def _ask_live_refine(engine: str) -> bool:
-    """停止後に高精度モデルで再文字起こしするか(mlx のときだけ質問する。既定は y)"""
+    """停止後に高精度モデルで再文字起こしするか(mlx のときだけ質問する。既定は n)"""
     if engine != "mlx":
         return False
     console.print(
@@ -290,7 +290,7 @@ def _ask_live_refine(engine: str) -> bool:
         "\n  録音と同じくらいの待ち時間と、モデル分のメモリ(約3GB)が必要です。"
     )
     answer = Prompt.ask(
-        "[bold]停止後に高精度で再文字起こししますか？[/bold]", choices=["y", "n"], default="y"
+        "[bold]停止後に高精度で再文字起こししますか？[/bold]", choices=["y", "n"], default="n"
     )
     enabled = answer == "y"
     console.print(f"[green]✓ 高精度の再文字起こし: {'有効' if enabled else '無効'}[/green]")

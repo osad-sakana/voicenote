@@ -19,6 +19,7 @@ from tests.live_workflow_fakes import (
     FakeRefine,
     Harness,
     reset_deferred_threads,
+    run_named,
 )
 
 
@@ -98,11 +99,27 @@ class TestRefineFlow:
         assert "高精度の要約" in body
         assert h.summaries == [("高精度の発話",)]
 
-    def test_session_stop_skips_full_summary_when_refine_planned(self, tmp_path):
+    def test_session_stop_keeps_full_summary_even_when_refine_planned(self, tmp_path):
         h = _harness(tmp_path)
         h.start()
         h.wf.stop()
-        assert h.sessions[0].rebuild_summary == [False]
+        assert h.sessions[0].rebuild_summary == [True]
+
+    def test_waits_for_asr_idle_before_refine(self, tmp_path):
+        h = _harness(tmp_path)
+        h.start()
+        h.wf.stop()
+        assert h.log.index("session.wait_asr_idle") < h.log.index("refine.release_live")
+
+    def test_asr_not_idle_skips_refine(self, tmp_path):
+        h = _harness(tmp_path)
+        h.start()
+        h.sessions[0].asr_idle = False
+        h.wf.stop()
+        assert h.refine.calls == []
+        assert h.overwrites == []
+        assert h.spy.done == [(h.wav, _fast_note(h))]
+        assert any("スキップ" in m for m in h.spy.logs)
 
     def test_live_engine_released_before_refine_engine_loads(self, tmp_path):
         h = _harness(tmp_path)
@@ -226,21 +243,55 @@ class TestRefineSkips:
 
 
 class TestRefineModelFetch:
-    def test_refine_model_fetched_while_preparing(self, tmp_path):
+    def test_refine_model_fetched_in_background_after_recording_starts(self, tmp_path):
         fetcher = FakeFetcher()
         fetcher.uncached = frozenset({"repo/large-v3"})
         h = _harness(tmp_path, fetcher=fetcher)
+        h.wf._thread_factory = DeferredThread
         h.start()
+        run_named("live-prepare")
+        assert h.state.phase is LivePhase.RECORDING  # 取得を待たずに録音を始める
+        assert fetcher.fetched == []
+        fetch_thread = next(t for t in DeferredThread.instances if t.name == "refine-model-fetch")
+        assert fetch_thread.daemon is True
+        fetch_thread.run()
         assert [r.repo_id for r in fetcher.fetched] == ["repo/large-v3"]
-        assert h.state.phase is LivePhase.RECORDING
-        h.wf.stop()
-        assert h.refine.calls
 
-    def test_fetch_failure_continues_recording_without_refine(self, tmp_path):
+    def test_still_fetching_at_stop_skips_refine(self, tmp_path):
+        fetcher = FakeFetcher()
+        fetcher.uncached = frozenset({"repo/large-v3"})
+        h = _harness(tmp_path, fetcher=fetcher)
+        h.wf._thread_factory = DeferredThread
+        h.start()
+        run_named("live-prepare")
+        h.wf.stop()
+        run_named("live-stop")
+        run_named("live-drain")
+        assert h.refine.calls == []
+        assert h.state.phase is LivePhase.IDLE
+        assert h.spy.done == [(h.wav, _fast_note(h))]
+        assert any("取得中" in m and "高精度で文字起こし" in m for m in h.spy.logs)
+
+    def test_no_second_fetch_while_previous_is_running(self, tmp_path):
+        fetcher = FakeFetcher()
+        fetcher.uncached = frozenset({"repo/large-v3"})
+        h = _harness(tmp_path, fetcher=fetcher)
+        h.wf._thread_factory = DeferredThread
+        h.start()
+        run_named("live-prepare")
+        h.wf.stop()
+        run_named("live-stop")
+        run_named("live-drain")
+        h.start()  # 2回目の実行(前回の取得はまだ動いている)
+        run_named("live-prepare")
+        fetches = [t for t in DeferredThread.instances if t.name == "refine-model-fetch"]
+        assert len(fetches) == 1
+
+    def test_fetch_failure_only_logs_and_recording_continues(self, tmp_path):
         class FailingFetcher(FakeFetcher):
             def fetch(self, repo, on_progress):
                 if repo.repo_id == "repo/large-v3":
-                    raise OSError("network down")
+                    raise OSError("secret /Users/x")
                 return super().fetch(repo, on_progress)
 
         fetcher = FailingFetcher()
@@ -248,10 +299,10 @@ class TestRefineModelFetch:
         h = _harness(tmp_path, fetcher=fetcher)
         h.start()
         assert h.state.phase is LivePhase.RECORDING
-        assert h.banner(BANNER_REFINE) is not None
+        assert any("取得できませんでした" in m and "OSError" in m for m in h.spy.logs)
+        assert not any("secret" in m for m in h.spy.logs)
         h.wf.stop()
         assert h.refine.calls == []
-        assert h.sessions[0].rebuild_summary == [True]
 
     def test_faster_whisper_does_not_fetch_refine_model(self, tmp_path):
         fetcher = FakeFetcher()
@@ -330,6 +381,21 @@ class TestRefineAbort:
         refine_thread.run()
         assert h.overwrites == []
         assert h.spy.done == []
+
+    def test_abandoned_refine_does_not_log(self, tmp_path):
+        h = _harness(tmp_path)
+        h.start()
+        refine_thread = _stop_until_refining(h)
+        h.wf.abort_drain()
+        h.spy.logs.clear()
+        refine_thread.run()  # 高精度モデルの読み込み通知(notify)は捨てる
+        assert not any("large-v3" in m for m in h.spy.logs)
+
+    def test_refine_notify_logged_while_current(self, tmp_path):
+        h = _harness(tmp_path)
+        h.start()
+        h.wf.stop()
+        assert any("large-v3 を読み込みました" in m for m in h.spy.logs)
 
     def test_abort_not_accepted_when_idle(self, tmp_path):
         h = _harness(tmp_path)

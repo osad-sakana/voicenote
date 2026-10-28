@@ -26,6 +26,10 @@ from live.summarizer import (
 _logger = logging.getLogger("voicenote")
 
 FULL_CHUNK_CHARS = 3000
+# 全文要約の上限時間 = 呼び出し回数(塊数 + 統合1回) × これ。下限・上限で丸める
+FULL_SUMMARY_SEC_PER_CALL = 60.0
+FULL_SUMMARY_MIN_TIMEOUT_SEC = 120.0
+FULL_SUMMARY_MAX_TIMEOUT_SEC = 1200.0
 
 _FULL_SYSTEM_PROMPT = f"""\
 あなたは会議や講義の文字起こしを要約するアシスタントです。
@@ -159,3 +163,12 @@ def summarize_full(
     if _should_stop(deadline, clock, cancel):
         return None
     return _ask(backend, build_merge_messages(partials, context))
+
+
+def full_summary_timeout(texts: Sequence[str], max_chunk_chars: int = FULL_CHUNK_CHARS) -> float:
+    """summarize_full に与える上限時間(秒)。LLM の呼び出し回数(塊数 + 統合1回)に比例させる"""
+    calls = len(split_chunks(texts, max_chunk_chars)) + 1
+    return min(
+        FULL_SUMMARY_MAX_TIMEOUT_SEC,
+        max(FULL_SUMMARY_MIN_TIMEOUT_SEC, FULL_SUMMARY_SEC_PER_CALL * calls),
+    )

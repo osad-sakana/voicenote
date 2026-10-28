@@ -389,3 +389,105 @@ class TestFormatRefineProgress:
 
     def test_zero_total_is_safe(self):
         assert "0%" in format_refine_progress(0.0, 0.0, None)
+
+
+# ──────────────── レビュー指摘(1回目) ────────────────
+
+
+class TestPlanWindowsValidation:
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"num_samples": -1},
+            {"sample_rate": 0},
+            {"target_sec": 0},
+            {"search_sec": 0.05},  # QUIET_PROBE_SEC 未満
+            {"search_sec": 60.0},  # target_sec 以上
+        ],
+    )
+    def test_rejects_invalid_arguments(self, kwargs):
+        args = {"num_samples": SR * 10, "sample_rate": SR, "target_sec": 60.0, "search_sec": 5.0}
+        args.update(kwargs)
+        with pytest.raises(ValueError):
+            plan_windows(
+                args["num_samples"],
+                lambda s, e: 1.0,
+                args["sample_rate"],
+                target_sec=args["target_sec"],
+                search_sec=args["search_sec"],
+            )
+
+
+class TestDecideRefineFetching:
+    def test_skips_while_model_is_being_fetched(self):
+        settings = LiveSettings(engine="mlx", refine_enabled=True)
+        decision = decide_refine(settings, "mlx", False, fetching=True)
+        assert decision.run is False
+        assert "取得中" in decision.reason
+
+
+class TestSummarizeRefined:
+    def _segments(self, *texts):
+        from live.session_models import LiveSegment
+
+        return tuple(LiveSegment(i, float(i), float(i) + 1, t) for i, t in enumerate(texts))
+
+    def test_uses_summary_and_deadline_scaled_by_calls(self):
+        from live.full_summary import full_summary_timeout
+        from live.refine import summarize_refined
+
+        calls = []
+
+        def summarize(backend, texts, context, *, deadline, cancel=None, clock=None):
+            calls.append((texts, deadline))
+            return "新しい要約"
+
+        segments = self._segments("一つ目の発話", "二つ目の発話")
+        summary = summarize_refined(
+            object(), segments, None, "速報の要約", summarize=summarize, clock=lambda: 100.0
+        )
+        assert summary == "新しい要約"
+        texts, deadline = calls[0]
+        assert texts == ("一つ目の発話", "二つ目の発話")
+        assert deadline == pytest.approx(100.0 + full_summary_timeout(texts))
+
+    def test_falls_back_without_backend_or_segments(self):
+        from live.refine import summarize_refined
+
+        def never(*a, **k):
+            raise AssertionError("呼ばれない")
+
+        assert summarize_refined(None, self._segments("a"), None, "速報", summarize=never) == "速報"
+        assert summarize_refined(object(), (), None, "速報", summarize=never) == "速報"
+
+    def test_failure_falls_back(self):
+        from live.refine import summarize_refined
+
+        def broken(*a, **k):
+            raise RuntimeError("本文")
+
+        result = summarize_refined(object(), self._segments("a"), None, "速報", summarize=broken)
+        assert result == "速報"
+        none = summarize_refined(
+            object(), self._segments("a"), None, "速報", summarize=lambda *a, **k: None
+        )
+        assert none == "速報"
+
+
+class TestFullSummaryTimeout:
+    def test_scales_with_chunk_count_within_bounds(self):
+        from live.full_summary import (
+            FULL_CHUNK_CHARS,
+            FULL_SUMMARY_MAX_TIMEOUT_SEC,
+            FULL_SUMMARY_MIN_TIMEOUT_SEC,
+            FULL_SUMMARY_SEC_PER_CALL,
+            full_summary_timeout,
+        )
+
+        one = full_summary_timeout(("短い発話",))
+        assert one == max(FULL_SUMMARY_MIN_TIMEOUT_SEC, FULL_SUMMARY_SEC_PER_CALL * 2)
+        five = full_summary_timeout(tuple("あ" * FULL_CHUNK_CHARS for _ in range(5)))
+        assert five == min(FULL_SUMMARY_MAX_TIMEOUT_SEC, FULL_SUMMARY_SEC_PER_CALL * 6)
+        huge = full_summary_timeout(tuple("あ" * FULL_CHUNK_CHARS for _ in range(500)))
+        assert huge == FULL_SUMMARY_MAX_TIMEOUT_SEC
+        assert full_summary_timeout(()) == FULL_SUMMARY_MIN_TIMEOUT_SEC

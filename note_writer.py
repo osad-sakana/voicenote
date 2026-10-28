@@ -16,6 +16,8 @@ from pathlib import Path
 
 # 録音 WAV の stem 末尾(`_recording` / `_recording_2` 等)。除くと開始時刻が残る
 _RECORDING_SUFFIX_PATTERN = re.compile(r"_recording(?:_\d+)?$")
+# frontmatter の created に書く datetime.isoformat() の形(引き継ぐ値の検証用)
+_ISO_DATETIME = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[+-]\d{2}:\d{2})?")
 
 
 def save_transcript(save_folder: Path, transcription: str, format_mode: str = "none") -> Path:
@@ -124,12 +126,16 @@ def save_live_note(
 
 
 def _live_note_content(
-    now: datetime, body: str, participants: tuple[str, ...], *, refined: bool
+    now: datetime | str, body: str, participants: tuple[str, ...], *, refined: bool
 ) -> str:
-    """ライブノートの frontmatter + 本文。refined なら tags に refined を足す"""
+    """ライブノートの frontmatter + 本文。refined なら tags に refined を足す
+
+    now は日時か、既存ノートから引き継いだ created の値(文字列)。
+    """
     refined_tag = "  - refined\n" if refined else ""
+    created = now if isinstance(now, str) else now.isoformat()
     return f"""---
-created: {now.isoformat()}
+created: {created}
 type: live-transcription
 tags:
   - recording
@@ -137,6 +143,23 @@ tags:
 {refined_tag}{_participants_yaml(participants)}---
 {body}
 """
+
+
+def _existing_created(path: Path) -> str | None:
+    """既存ノートの frontmatter(先頭の --- で囲まれた部分)から created の値を読む。無ければ None"""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return None
+    if not lines or lines[0] != "---":
+        return None
+    for line in lines[1:]:
+        if line == "---":
+            return None
+        if line.startswith("created: "):
+            value = line[len("created: ") :].strip()
+            return value if _ISO_DATETIME.fullmatch(value) else None
+    return None
 
 
 def _replace_atomically(path: Path, content: str) -> None:
@@ -178,7 +201,8 @@ def overwrite_live_note(
         RuntimeError: 保存失敗時(対象が無い場合を含む)
     """
     path = Path(path)
-    content = _live_note_content(datetime.now(), body, tuple(participants), refined=refined)
+    created = _existing_created(path) or datetime.now()  # 読み取れなければ現在時刻
+    content = _live_note_content(created, body, tuple(participants), refined=refined)
     try:
         _replace_atomically(path, content)
         return path

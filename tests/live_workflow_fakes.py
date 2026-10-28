@@ -52,6 +52,8 @@ class DeferredThread:
     def __init__(self, target, args=(), daemon=None, name=None, **kwargs):
         self.target = target
         self.args = args
+        self.name = name
+        self.daemon = daemon
         self.started = False
         self.finished = False
         DeferredThread.instances.append(self)
@@ -77,6 +79,14 @@ def reset_deferred_threads() -> None:
     DeferredThread.instances = []
 
 
+def run_named(name: str) -> None:
+    """捕捉済みで未実行の、指定した名前の Deferred スレッドを1本実行する"""
+    thread = next(
+        t for t in DeferredThread.instances if t.name == name and t.started and not t.finished
+    )
+    thread.run()
+
+
 def run_pending() -> None:
     """捕捉済みで未実行の Deferred スレッドを順に実行する(実行中に増えた分も含む)"""
     while True:
@@ -94,9 +104,10 @@ class Unavailable(Exception):
 
 
 class FakeEngine:
-    def __init__(self, name, model, fail_load=False, log=None):
+    def __init__(self, name, model, fail_load=False, log=None, notify=None):
         self.name = name
         self.model = model
+        self.notify = notify
         self.fail_load = fail_load
         self.log = log if log is not None else []
         self.loaded = False
@@ -112,6 +123,8 @@ class FakeEngine:
             raise Unavailable(f"{self.name} を読み込めません")
         self.loaded = True
         self.log.append(f"load:{self.name}:{self.model}")
+        if self.notify is not None:
+            self.notify(f"{self.name} モデル {self.model} を読み込みました")
 
     def transcribe(self, samples, language, prompt=None):
         return f"{self.name}:{language}"
@@ -131,7 +144,9 @@ class FakeEngineApi:
     def create_engine(self, name, model, notify=None):
         if name in self.unavailable:
             raise Unavailable(f"{name} は使えません")
-        engine = FakeEngine(name, model, fail_load=name in self.load_fails, log=self.log)
+        engine = FakeEngine(
+            name, model, fail_load=name in self.load_fails, log=self.log, notify=notify
+        )
         self.created.append(engine)
         return engine
 
@@ -282,6 +297,7 @@ class FakeSession:
         self.rebuild_summary: list[bool] = []
         self.backlog_sec = 1.5
         self.dropped_chunks = 3
+        self.asr_idle = True  # wait_asr_idle の戻り値
 
     def start(self):
         self.log.append("session.start")
@@ -293,6 +309,10 @@ class FakeSession:
     def set_context(self, context):
         self.log.append("session.set_context")
         self.context_updates.append(context)
+
+    def wait_asr_idle(self, timeout):
+        self.log.append("session.wait_asr_idle")
+        return self.asr_idle
 
     def stop(self, timeout=30.0, rebuild_summary=True):
         self.log.append("session.stop")

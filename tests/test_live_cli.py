@@ -525,23 +525,25 @@ class TestLoadTimeFallback:
 class FakeModelFetch:
     """live_cli.model_fetch の代役(通信しない)"""
 
-    def __init__(self, cached=True, fetch_error: Exception | None = None):
+    def __init__(self, cached=True, fetch_error: Exception | None = None, events=None):
         self.cached = cached
         self.fetch_error = fetch_error
         self.fetched: list = []
+        self.events = events if events is not None else []
 
     def resolve_repo(self, engine, model):
-        return f"repo/{engine}/{model}"
+        from live.model_fetch import RepoSpec
+
+        return RepoSpec(f"repo/{engine}/{model}")
 
     def is_cached(self, repo):
         return self.cached
 
     def fetch(self, repo, on_progress):
-        on_progress(0, 0)
-        on_progress(50, 100)
+        self.events.append("fetch")
         if self.fetch_error is not None:
             raise self.fetch_error
-        self.fetched.append(repo)
+        self.fetched.append(repo.repo_id)
         self.cached = True
         return "/cache"
 
@@ -552,8 +554,30 @@ class FakeModelFetch:
 @pytest.fixture
 def refine_env(env, monkeypatch):
     """mlx + 再文字起こし有効の設定と、refine_wav / overwrite / summarize_full の偽物"""
-    fetch = FakeModelFetch()
+    fetch = FakeModelFetch(events=env.events)
     monkeypatch.setattr(live_cli, "model_fetch", fetch)
+    fetch_threads: list = []
+
+    class SyncThread:
+        """取得スレッドを start() で同期実行する(defer=True なら走らせず取得中のまま)"""
+
+        defer = False
+
+        def __init__(self, target, args=(), daemon=None, name=None, **kwargs):
+            self.target, self.args, self.daemon = target, args, daemon
+            self.alive = False
+            fetch_threads.append(self)
+
+        def start(self):
+            if SyncThread.defer:
+                self.alive = True
+                return
+            self.target(*self.args)
+
+        def is_alive(self):
+            return self.alive
+
+    monkeypatch.setattr(live_cli, "_fetch_thread_factory", SyncThread)
     refine_calls: list[dict] = []
     overwrites: list[tuple[Path, str, bool]] = []
     summaries: list[tuple[str, ...]] = []
@@ -583,6 +607,8 @@ def refine_env(env, monkeypatch):
         env.events.append("wait_asr_idle") or True
     )
     env.fetch = fetch
+    env.fetch_thread_cls = SyncThread
+    env.fetch_threads = fetch_threads
     env.refine_calls = refine_calls
     env.overwrites = overwrites
     env.summaries = summaries
@@ -608,7 +634,8 @@ class TestRefine:
             "refine_wav",
             "overwrite_live_note",
         ]
-        assert refine_env.stop_kwargs == [{"rebuild_summary": False}]
+        # 速報版でも全文要約を省かない
+        assert refine_env.stop_kwargs == [{}]
 
     def test_overwritten_note_has_both_transcripts_and_new_summary(self, refine_env):
         live_cli.run_live(refine_env.config, None, refine_env.dest)
@@ -651,13 +678,13 @@ class TestRefine:
         config = replace(refine_env.config, live_refine_enabled=False)
         live_cli.run_live(config, None, refine_env.dest)
         assert "refine_wav" not in refine_env.events
-        assert refine_env.stop_kwargs == [{"rebuild_summary": True}]
+        assert refine_env.stop_kwargs == [{}]
 
     def test_creation_fallback_skips_refine_with_file_hint(self, refine_env):
         refine_env.engine_errors["mlx"] = FakeUnavailable("no mlx")
         live_cli.run_live(refine_env.config, None, refine_env.dest)
         assert "refine_wav" not in refine_env.events
-        assert refine_env.stop_kwargs == [{"rebuild_summary": True}]
+        assert refine_env.stop_kwargs == [{}]
         assert "--file" in refine_env.out.getvalue()
 
     def test_load_time_fallback_skips_refine(self, refine_env):
@@ -673,19 +700,57 @@ class TestRefine:
         text = refine_env.out.getvalue()
         assert "faster-whisper" in text and "スキップ" in text
 
-    def test_model_fetched_before_recording_when_missing(self, refine_env):
+    def test_model_fetched_in_background_after_recording_starts(self, refine_env):
         refine_env.fetch.cached = False
         live_cli.run_live(refine_env.config, None, refine_env.dest)
+        events = refine_env.events
+        assert events.index("record_audio") < events.index("fetch") < events.index("on_saved")
         assert refine_env.fetch.fetched == ["repo/mlx/large-v3"]
-        assert "refine_wav" in refine_env.events
+        assert refine_env.fetch_threads[0].daemon is True
+        assert "refine_wav" in events
+
+    def test_fetch_still_running_at_stop_skips_with_file_hint(self, refine_env):
+        refine_env.fetch.cached = False
+        refine_env.fetch_thread_cls.defer = True
+        live_cli.run_live(refine_env.config, None, refine_env.dest)
+        assert "refine_wav" not in refine_env.events
+        text = refine_env.out.getvalue()
+        assert "取得中" in text
+        assert "--file" in text
 
     def test_fetch_failure_continues_without_refine(self, refine_env):
         refine_env.fetch.cached = False
-        refine_env.fetch.fetch_error = OSError("net")
+        refine_env.fetch.fetch_error = OSError("secret /Users/x")
         live_cli.run_live(refine_env.config, None, refine_env.dest)
         assert "record_audio" in refine_env.events
         assert "refine_wav" not in refine_env.events
-        assert "取得できませんでした" in refine_env.out.getvalue()
+        text = refine_env.out.getvalue()
+        assert "取得できませんでした" in text and "OSError" in text
+        assert "secret" not in text
+
+    def test_cached_model_starts_no_fetch_thread(self, refine_env):
+        live_cli.run_live(refine_env.config, None, refine_env.dest)
+        assert refine_env.fetch_threads == []
+
+    def test_ctrl_c_while_waiting_for_asr_keeps_fast_note(self, refine_env):
+        def interrupted(timeout):
+            raise KeyboardInterrupt
+
+        refine_env.session.wait_asr_idle.side_effect = interrupted
+        live_cli.run_live(refine_env.config, None, refine_env.dest)  # 例外を外へ漏らさない
+        assert "save_live_note" in refine_env.events
+        assert refine_env.overwrites == []
+        assert "中断" in refine_env.out.getvalue()
+
+    def test_ctrl_c_while_planning_keeps_fast_note(self, refine_env, monkeypatch):
+        def interrupted(*_a, **_k):
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(live_cli, "decide_refine", interrupted)
+        live_cli.run_live(refine_env.config, None, refine_env.dest)
+        assert "save_live_note" in refine_env.events
+        assert "refine_wav" not in refine_env.events
+        assert "中断" in refine_env.out.getvalue()
 
     def test_asr_not_idle_skips_refine(self, refine_env):
         refine_env.session.wait_asr_idle.side_effect = None

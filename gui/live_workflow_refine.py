@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import logging
 import threading
-import time
 import traceback
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -21,10 +20,16 @@ from pathlib import Path
 from typing import Any
 
 from live.asr_hint import build_asr_hint
-from live.bootstrap import LiveSetupError, effective_engine_name
+from live.bootstrap import effective_engine_name
 from live.context import LiveContext
 from live.note import render_live_note
-from live.refine import REFINE_ENGINE, RefineDecision, decide_refine
+from live.refine import (
+    REFINE_ASR_IDLE_TIMEOUT_SEC,
+    REFINE_ENGINE,
+    RefineDecision,
+    decide_refine,
+    summarize_refined,
+)
 from live.session_models import LiveResult, LiveSettings, RefinedTranscript
 
 from .live_state import LivePhase, set_phase
@@ -37,7 +42,6 @@ from .live_workflow_support import (
 
 _logger = logging.getLogger("voicenote")
 
-REFINE_SUMMARY_TIMEOUT_SEC = 180.0  # 高精度版からの要約の上限
 SKIP_HINT = "完了後に「高精度で文字起こし」から再文字起こしできます"
 
 
@@ -47,6 +51,7 @@ class RefineJob:
 
     settings: LiveSettings
     engine: Any  # SerializedEngine(unload_locked でリアルタイム用エンジンを解放する)
+    session: Any  # ライブの LiveSession(asr スレッドの終了を待つ)
     backend: Any | None
     wav: Path
     note: Path
@@ -63,10 +68,17 @@ class RefineOutcome:
     message: str
 
 
-def plan_refine(settings: LiveSettings, engine, fetcher) -> RefineDecision:
-    """停止前に、再文字起こしを行うか決める(実際に動いたエンジン・モデルの取得状況から)"""
-    cached = settings.refine_enabled and _is_cached(settings.refine_model, fetcher)
-    return decide_refine(settings, effective_engine_name(engine, settings), cached)
+def plan_refine(
+    settings: LiveSettings, engine, fetcher, *, fetching: bool = False
+) -> RefineDecision:
+    """再文字起こしを行うか決める(実際に動いたエンジン・モデルの取得状況から)
+
+    fetching はバックグラウンドで高精度モデルを取得中か(取得中はスキップ)。
+    """
+    cached = settings.refine_enabled and not fetching and _is_cached(settings.refine_model, fetcher)
+    return decide_refine(
+        settings, effective_engine_name(engine, settings), cached, fetching=fetching
+    )
 
 
 def _is_cached(model: str, fetcher) -> bool:
@@ -120,6 +132,11 @@ class RefineRunner:
     ) -> RefineOutcome:
         """再文字起こしして上書き本文を返す。中断・失敗・時間切れなら body=None"""
         context = get_context()
+        wait_idle = getattr(job.session, "wait_asr_idle", None)
+        if callable(wait_idle) and not wait_idle(REFINE_ASR_IDLE_TIMEOUT_SEC):
+            return _keep(
+                "ライブの文字起こしが終わらないため、高精度の再文字起こしをスキップしました"
+            )
         if not self._engine_lock.acquire(timeout=self._lock_timeout):
             return _keep(
                 "前回の処理がエンジンを使用中のため、高精度の再文字起こしをスキップしました"
@@ -167,21 +184,15 @@ class RefineRunner:
         return RefineOutcome(body, context.participants, "高精度版でライブノートを上書きしました")
 
     def _summarize(self, job: RefineJob, refined, cancel, context: LiveContext) -> str:
-        """高精度版の全文から要約を作り直す。作れなければ速報版の要約"""
-        if job.backend is None or not refined.segments:
-            return job.result.final_summary
-        try:
-            summary = self._deps.full_summarizer(
-                job.backend,
-                tuple(s.text for s in refined.segments),
-                context,
-                deadline=time.monotonic() + REFINE_SUMMARY_TIMEOUT_SEC,
-                cancel=cancel,
-            )
-        except Exception as e:
-            _logger.warning("高精度版からの要約に失敗しました: %s", type(e).__name__)
-            summary = None
-        return summary or job.result.final_summary
+        """高精度版の全文から要約を作り直す(上限は呼び出し回数に比例)。作れなければ速報版の要約"""
+        return summarize_refined(
+            job.backend,
+            refined.segments,
+            context,
+            job.result.final_summary,
+            summarize=self._deps.full_summarizer,
+            cancel=cancel,
+        )
 
 
 def _keep(message: str) -> RefineOutcome:
@@ -194,28 +205,45 @@ class RefineLifecycle:
 
     LiveWorkflow の _lock / _state / _gen / _run / _closed / _deps / _callbacks / _clock /
     _engine_lock / _engine_lock_timeout / _drain_thread / _abandoned_drain / _live_settings /
-    _live_engine / _backend / _refine_note と、_safe / _update / _banner / _finish_run /
-    _ensure_model / context を使う。共有状態の読み書きはすべて _lock 下で行う。
+    _live_engine / _session / _backend / _refine_note / _refine_fetch と、_safe / _update /
+    _banner / _finish_run / context を使う。共有状態の読み書きはすべて _lock 下で行う。
     """
 
-    def _ensure_refine_model(self, settings: LiveSettings, run) -> LiveSettings:
-        """再文字起こしを予定していれば高精度モデルも取得する。失敗しても録音は続ける"""
+    def _start_refine_fetch(self, settings: LiveSettings) -> None:
+        """再文字起こしを予定していて高精度モデルが未取得なら、録音中にバックグラウンドで取得する
+
+        録音の開始は待たせない。同じモデルの取得が前回の実行から続いていれば新たに始めない。
+        失敗はログだけ(型名のみ)で、録音は続ける。
+        """
         if not settings.refine_enabled or settings.engine != REFINE_ENGINE:
-            return settings
-        try:
-            self._ensure_model(REFINE_ENGINE, settings.refine_model, run)
-        except LiveSetupError as e:
-            self._banner(run, BANNER_REFINE, f"{e} 高精度の再文字起こしなしで続行します。")
-            return replace(settings, refine_enabled=False)
-        return settings
+            return
+        model = settings.refine_model
+        status = self._refine_fetch.start(
+            self._deps.model_fetcher,
+            REFINE_ENGINE,
+            model,
+            on_failed=lambda msg: self._safe(
+                self._callbacks.on_log, f"{msg}。高精度の再文字起こしなしで続行します"
+            ),
+        )
+        if status == "started":
+            self._safe(
+                self._callbacks.on_log,
+                f"高精度モデル {model} をバックグラウンドで取得しています"
+                "（取得が終わる前に停止した場合、再文字起こしはしません）",
+            )
 
     def _plan_refine(self) -> bool:
-        """停止前に再文字起こしを行うか決める。行わない理由があればログで案内する"""
+        """再文字起こしを行うか決める。行わない理由があればログで案内する"""
         with self._lock:
             settings, engine = self._live_settings, self._live_engine
         if settings is None:
             return False
-        decision = plan_refine(settings, engine, self._deps.model_fetcher)
+        fetcher = self._deps.model_fetcher
+        fetching = settings.refine_enabled and self._refine_fetch.is_fetching(
+            fetcher, REFINE_ENGINE, settings.refine_model
+        )
+        decision = plan_refine(settings, engine, fetcher, fetching=fetching)
         if decision.reason:
             self._safe(self._callbacks.on_log, f"{decision.reason}。{SKIP_HINT}")
         return decision.run
@@ -241,6 +269,7 @@ class RefineLifecycle:
             job = RefineJob(
                 self._live_settings,
                 self._live_engine,
+                self._session,
                 self._backend,
                 wav,
                 note,
@@ -267,7 +296,7 @@ class RefineLifecycle:
             self._deps,
             self._engine_lock,
             lock_timeout=self._engine_lock_timeout,
-            notify=lambda msg: self._safe(self._callbacks.on_log, msg),
+            notify=lambda msg: self._log_for(run, msg),
         )
         progress = ProgressThrottle(self._clock, lambda t: self._banner(run, BANNER_REFINE, t))
         try:
@@ -285,6 +314,13 @@ class RefineLifecycle:
         self._safe(self._callbacks.on_log, message)
         self._finish_run(run)
         self._safe(self._callbacks.on_done, job.wav, job.note)
+
+    def _log_for(self, run, message: str) -> None:
+        """現行の実行のときだけログを流す(放棄した再文字起こしの通知は捨てる)"""
+        with self._lock:
+            current = run.gen == self._gen
+        if current:
+            self._safe(self._callbacks.on_log, message)
 
     def _overwrite(self, job: RefineJob, outcome: RefineOutcome) -> str:
         """上書き本文があれば速報版ノートを原子的に上書きする。ログ文言を返す"""

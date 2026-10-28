@@ -207,3 +207,27 @@ class TestOverwriteLiveNote:
 
         with pytest.raises(RuntimeError):
             overwrite_live_note(tmp_path / "missing_live.md", "本文")
+
+
+class TestOverwriteKeepsCreated:
+    def test_keeps_created_of_existing_note(self, tmp_path: Path):
+        from note_writer import overwrite_live_note
+
+        path = save_live_note(tmp_path, "速報版の本文")
+        created_line = next(
+            line
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.startswith("created: ")
+        )
+        overwrite_live_note(path, "高精度版", refined=True)
+        assert created_line in path.read_text(encoding="utf-8").splitlines()
+
+    def test_uses_now_when_created_unreadable(self, tmp_path: Path):
+        from note_writer import overwrite_live_note
+
+        path = tmp_path / "x_live.md"
+        path.write_text("frontmatter なしの本文\ncreated: 偽物\n", encoding="utf-8")
+        overwrite_live_note(path, "高精度版")
+        content = path.read_text(encoding="utf-8")
+        assert "created: 偽物" not in content
+        assert re.search(r"^created: \d{4}-\d{2}-\d{2}T", content, re.MULTILINE)

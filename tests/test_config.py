@@ -352,16 +352,16 @@ def _refine_prompts(monkeypatch, engine_choice: str, refine_answer: str | None):
 
 
 class TestConfigureLiveRefine:
-    def test_mlx_asks_and_defaults_to_yes(self, monkeypatch):
+    def test_mlx_asks_and_defaults_to_no(self, monkeypatch):
         questions = _refine_prompts(monkeypatch, "1", None)
         overrides = configure_live_interactive()
         assert len(questions) == 1
-        assert questions[0][1]["default"] == "y"
-        assert overrides["live_refine_enabled"] is True
+        assert questions[0][1]["default"] == "n"
+        assert overrides["live_refine_enabled"] is False
 
-    def test_mlx_answer_no(self, monkeypatch):
-        _refine_prompts(monkeypatch, "1", "n")
-        assert configure_live_interactive()["live_refine_enabled"] is False
+    def test_mlx_answer_yes(self, monkeypatch):
+        _refine_prompts(monkeypatch, "1", "y")
+        assert configure_live_interactive()["live_refine_enabled"] is True
 
     def test_faster_whisper_does_not_ask(self, monkeypatch):
         questions = _refine_prompts(monkeypatch, "2", "y")
