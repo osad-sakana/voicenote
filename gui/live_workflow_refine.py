@@ -22,6 +22,7 @@ from typing import Any
 from live.asr_hint import build_asr_hint
 from live.bootstrap import effective_engine_name
 from live.context import LiveContext
+from live.full_summary import format_skip_notice
 from live.note import render_live_note
 from live.refine import (
     REFINE_ASR_IDLE_TIMEOUT_SEC,
@@ -192,6 +193,7 @@ class RefineRunner:
             job.result.final_summary,
             summarize=self._deps.full_summarizer,
             cancel=cancel,
+            on_skip=lambda *counts: self._notify(format_skip_notice("高精度版からの要約", *counts)),
         )
 
 

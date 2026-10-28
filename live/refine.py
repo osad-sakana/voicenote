@@ -168,10 +168,12 @@ def summarize_refined(
     summarize: Callable[..., str | None],
     cancel: CancelFlag | None = None,
     clock: Callable[[], float] = time.monotonic,
+    on_skip: Callable[[int, float, float], None] | None = None,
 ) -> str:
     """高精度版の全文から要約を作り直す(CLI・GUI 共通)。作れなければ fallback(速報版の要約)
 
     上限時間は LLM の呼び出し回数(塊数 + 統合1回)に比例させる(full_summary_timeout)。
+    見積もり不足で省いたら on_skip(塊数, 見積もり秒, 残り秒) を呼ぶ(利用者への通知用)。
     失敗は型名だけをログに出す(本文・参考情報は出さない)。
     """
     if backend is None or not segments:
@@ -185,6 +187,7 @@ def summarize_refined(
             deadline=clock() + full_summary_timeout(texts),
             cancel=cancel,
             clock=clock,
+            on_skip=on_skip,
         )
     except Exception as e:
         _logger.warning("高精度版からの要約に失敗しました: %s", type(e).__name__)

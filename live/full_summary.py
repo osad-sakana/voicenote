@@ -170,8 +170,8 @@ def summarize_full(
         if on_skip is not None:
             try:
                 on_skip(len(chunks), estimate, max(0.0, remaining))
-            except Exception:
-                _logger.exception("全文要約の省略の通知に失敗しました")
+            except Exception as e:
+                _logger.warning("全文要約の省略の通知に失敗しました: %s", type(e).__name__)
         return None
     partials: list[str] = []
     for chunk in chunks:
@@ -186,6 +186,14 @@ def summarize_full(
     if _should_stop(deadline, clock, cancel):
         return None
     return _ask(backend, build_merge_messages(partials, context))
+
+
+def format_skip_notice(subject: str, chunks: int, estimate: float, remaining: float) -> str:
+    """全文要約を省いた旨の利用者向け文言(塊数・秒数のみ。本文は含めない)"""
+    return (
+        f"{subject}は時間内に終わらない見込みのため省きました"
+        f"（{chunks} 塊・見込み {estimate:.0f} 秒 > 残り {remaining:.0f} 秒）"
+    )
 
 
 def _estimated_sec(chunk_count: int, sec_per_call: float = FULL_SUMMARY_SEC_PER_CALL) -> float:

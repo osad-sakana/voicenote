@@ -438,7 +438,7 @@ class TestSummarizeRefined:
 
         calls = []
 
-        def summarize(backend, texts, context, *, deadline, cancel=None, clock=None):
+        def summarize(backend, texts, context, *, deadline, cancel=None, clock=None, on_skip=None):
             calls.append((texts, deadline))
             return "新しい要約"
 
@@ -492,3 +492,25 @@ class TestFullSummaryTimeout:
         huge = full_summary_timeout(tuple("あ" * FULL_CHUNK_CHARS for _ in range(500)))
         assert huge == FULL_SUMMARY_MAX_TIMEOUT_SEC + margin
         assert full_summary_timeout(()) == FULL_SUMMARY_MIN_TIMEOUT_SEC + margin
+
+
+def test_summarize_refined_passes_on_skip():
+    from live.refine import summarize_refined
+    from live.session_models import LiveSegment
+
+    seen = []
+
+    def summarize(backend, texts, context, *, deadline, cancel=None, clock=None, on_skip=None):
+        on_skip(3, 240.0, 125.0)
+        return None
+
+    result = summarize_refined(
+        object(),
+        (LiveSegment(0, 0.0, 1.0, "発話"),),
+        None,
+        "速報",
+        summarize=summarize,
+        on_skip=lambda *args: seen.append(args),
+    )
+    assert result == "速報"
+    assert seen == [(3, 240.0, 125.0)]

@@ -345,3 +345,16 @@ def test_on_skip_receives_counts_only():
     assert result is None
     assert skips == [(2, 180.0, 100.0)]
     assert backend.calls == []
+
+
+def test_on_skip_failure_logs_type_name_only(caplog):
+    def broken(*_args):
+        raise RuntimeError("secret detail")
+
+    with caplog.at_level("WARNING", logger="voicenote"):
+        result = _run(FakeBackend(), ["発言"], sec_per_call=60.0, deadline=10.0, on_skip=broken)
+    assert result is None
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("RuntimeError" in m for m in messages)
+    assert not any("secret" in m for m in messages)
+    assert all(r.exc_info is None for r in caplog.records)

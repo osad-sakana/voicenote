@@ -588,3 +588,17 @@ def test_refine_thread_start_failure_finishes_with_fast_note(tmp_path):
     assert h.state.phase is LivePhase.IDLE
     assert h.spy.done == [(h.wav, _fast_note(h))]
     assert h.wf.is_active is False
+
+
+def test_refined_summary_skip_is_logged_with_counts_only(tmp_path):
+    def skipping(backend, texts, context, **kwargs):
+        kwargs["on_skip"](2, 180.0, 100.0)
+        return None
+
+    h = _harness(tmp_path, full_summary=skipping)
+    h.start()
+    h.wf.stop()
+    skipped = [m for m in h.spy.logs if "省きました" in m]
+    assert len(skipped) == 1
+    assert "2 塊" in skipped[0]
+    assert "高精度の発話" not in skipped[0]

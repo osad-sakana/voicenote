@@ -857,3 +857,15 @@ class TestRefine:
         monkeypatch.setattr(live_cli, "overwrite_live_note", broken)
         live_cli.run_live(refine_env.config, None, refine_env.dest)
         assert "速報版" in refine_env.out.getvalue()
+
+
+def test_refined_summary_skip_is_warned_with_counts_only(refine_env, monkeypatch):
+    def skipping(backend, texts, context, **kwargs):
+        kwargs["on_skip"](2, 180.0, 100.0)
+        return None
+
+    monkeypatch.setattr(live_cli, "summarize_full", skipping)
+    live_cli.run_live(refine_env.config, None, refine_env.dest)
+    text = refine_env.out.getvalue()
+    assert "省きました" in text and "2 塊" in text
+    assert "高精度の発話" not in text.split("省きました")[0][-200:]

@@ -40,7 +40,7 @@ from live.bootstrap import (  # noqa: F401
     effective_engine_name,
     fallback_model,
 )
-from live.full_summary import summarize_full
+from live.full_summary import format_skip_notice, summarize_full
 from live.local_llm import LocalLLMClient, probe
 from live.note import external_send_warning, render_live_note
 from live.refine import (
@@ -448,7 +448,12 @@ def _refined_summary(job: _RefineJob, refined: RefinedTranscript, fallback: str)
     if job.backend is not None and refined.segments:
         console.print("[cyan]高精度版の全文から要約を作り直しています...[/cyan]")
     return summarize_refined(
-        job.backend, refined.segments, None, fallback, summarize=summarize_full
+        job.backend,
+        refined.segments,
+        None,
+        fallback,
+        summarize=summarize_full,
+        on_skip=lambda *counts: _warn(format_skip_notice("高精度版からの要約", *counts)),
     )
 
 

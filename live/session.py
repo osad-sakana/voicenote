@@ -27,7 +27,7 @@ from live.asr_hint import HINT_MIN_SEGMENT_SEC, build_asr_hint, is_hint_echo
 from live.chunk_queue import BoundedChunkQueue
 from live.context import LiveContext
 from live.framer import Framer
-from live.full_summary import full_summary_timeout, summarize_full
+from live.full_summary import format_skip_notice, full_summary_timeout, summarize_full
 from live.hallucination import is_hallucination
 from live.segment_queue import DropOldestQueue
 from live.segmenter import Segment, Segmenter
@@ -326,7 +326,9 @@ class LiveSession:
                     context,
                     deadline=full_deadline,
                     clock=time.monotonic,
-                    cancel=_AnySet(self._abort_asr, self._abort_full_summary),
+                    # ドレインの時間切れ(_abort_asr)では止めない: 集まった区間で全文要約を作る。
+                    # 止めるのは全文要約の時間切れと cancel_summary(どちらも _abort_full_summary)
+                    cancel=self._abort_full_summary,
                     on_skip=self._warn_full_summary_skipped,
                 )
             ),
@@ -344,13 +346,12 @@ class LiveSession:
 
     def _warn_full_summary_skipped(self, chunks: int, estimate: float, remaining: float) -> None:
         """全文要約を省いたことを知らせる(塊数・秒数のみ。本文は出さない)"""
-        self._warn(
-            f"全文からの最終要約は時間内に終わらない見込みのため省きました"
-            f"（{chunks} 塊・見込み {estimate:.0f} 秒 > 残り {remaining:.0f} 秒）"
-        )
+        self._warn(format_skip_notice("全文からの最終要約", chunks, estimate, remaining))
 
     def _rolling_final_summary(self, summarizer, before: str, deadline: float) -> str:
         """ローリング要約を強制実行して最終要約とする。時間切れなら直前の要約"""
+        if deadline <= time.monotonic():
+            return before  # 期限切れなら実行しない(待てない呼び出しを残さない)
         # interval 判定を無視して強制実行するため now=inf を渡す(送信中なら何もしない)
         worker = threading.Thread(
             target=lambda: summarizer.maybe_run(now=math.inf, backlog_sec=0.0),
@@ -487,16 +488,6 @@ class LiveSession:
         while not self._summary_stop.wait(self._settings.summary_poll_sec):
             if summarizer.maybe_run(backlog_sec=self.backlog_sec):
                 _safe_call(self._callbacks.on_summary, summarizer.summary)
-
-
-class _AnySet:
-    """いずれかの Event が立っていれば is_set() が True(summarize_full の cancel 用)"""
-
-    def __init__(self, *events: threading.Event):
-        self._events = events
-
-    def is_set(self) -> bool:
-        return any(event.is_set() for event in self._events)
 
 
 def _validate_context(context) -> None:

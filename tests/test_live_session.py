@@ -704,14 +704,15 @@ class TestSummary:
         """周期要約の呼び出し中に停止しても、その待ちの分で全文要約の期限が削られない"""
         import live.full_summary as full_summary_module
 
-        monkeypatch.setattr(full_summary_module, "FULL_SUMMARY_MARGIN_SEC", 0.1)
+        # 待ち(約2秒)が余裕(1秒)を超えるので、待ちの前から期限を数える旧実装では省かれる
+        monkeypatch.setattr(full_summary_module, "FULL_SUMMARY_MARGIN_SEC", 1.0)
         rec = Recorder()
 
         class SlowFirst(FakeBackend):
             def complete(self, messages):
                 self.calls += 1
                 if self.calls == 1:
-                    time.sleep(0.5)  # 停止時に周期要約が送信中
+                    time.sleep(2.0)  # 停止時に周期要約が送信中
                 return self.reply
 
         backend = SlowFirst()
@@ -740,6 +741,39 @@ class TestSummary:
         assert len(skipped) == 1, rec.warnings
         assert "1 塊" in skipped[0] and "秒" in skipped[0]
         assert "秘密" not in skipped[0]
+
+    def test_drain_timeout_still_builds_full_summary_from_collected_segments(
+        self, monkeypatch, gates
+    ):
+        """ドレインが時間切れでも、集まった区間で全文要約を作る(complete=False のまま)"""
+        import live.session as session_module
+
+        calls: list[tuple[str, ...]] = []
+
+        def fake_summarize_full(backend, texts, context, *, deadline, clock, cancel, on_skip=None):
+            calls.append(texts)
+            assert not cancel.is_set()
+            return "現在の話題: 集まった区間の要約"
+
+        monkeypatch.setattr(session_module, "summarize_full", fake_summarize_full)
+        engine = FakeEngine(responses=["最初の発話です", gates()])  # 2区間目で止まる
+        rec = Recorder()
+        session = make_session(engine, backend=FakeBackend(), rec=rec, clock=FakeClock(0.0))
+        session.start()
+        feed_audio(session, bursts(2))
+        assert wait_until(lambda: engine.calls == 2)
+        result = session.stop(timeout=0.3)
+        assert result.complete is False
+        assert calls == [("最初の発話です",)]
+        assert result.final_summary == "現在の話題: 集まった区間の要約"
+
+    def test_rolling_final_summary_returns_before_when_deadline_passed(self):
+        from unittest.mock import MagicMock
+
+        session = make_session(FakeEngine(), backend=FakeBackend())
+        summarizer = MagicMock()
+        assert session._rolling_final_summary(summarizer, "直前", time.monotonic() - 1.0) == "直前"
+        summarizer.maybe_run.assert_not_called()
 
     def test_wait_asr_idle_true_after_stop(self):
         session = make_session(FakeEngine())
