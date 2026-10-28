@@ -187,6 +187,26 @@ class TestRunLiveOrder:
 class TestInterruptDuringStop:
     """record_audio が SIGINT ハンドラを戻した後の Ctrl+C(session.stop 中)"""
 
+    def test_ctrl_c_during_summary_saves_partial_note(self, env):
+        """要約待ち中の Ctrl+C は要約を打ち切り、それまでの区間・直前の要約で速報ノートを保存する"""
+        calls: list[dict] = []
+
+        def stop(timeout=None, **kwargs):
+            env.events.append("session.stop")
+            calls.append(kwargs)
+            if len(calls) == 1:
+                raise KeyboardInterrupt
+            return env.result
+
+        env.session.stop.side_effect = stop
+        live_cli.run_live(env.config, None, env.dest)
+        env.session.cancel_summary.assert_called_once()
+        assert calls == [{}, {"summary_timeout": 0.0}]
+        assert "save_live_note" in env.events
+        assert "テスト発話" in env.note_bodies[0]
+        text = env.out.getvalue()
+        assert "要約" in text and "中断" in text
+
     def _interrupt(self, env):
         def stop(timeout=None, **_kw):
             env.events.append("session.stop")
@@ -416,6 +436,7 @@ class TestRecordingErrors:
             live_cli.run_live(env.config, None, env.dest)
         assert exc.value.code == 1
         env.session.stop.assert_called_once()
+        assert env.stop_kwargs == [{"summary_timeout": 0.0}]  # エラー経路では要約を作らない
         assert "save_live_note" not in env.events
 
 

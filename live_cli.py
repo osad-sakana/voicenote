@@ -223,7 +223,7 @@ def run_live(config: VoiceNoteConfig, device: str | None, dest_dir: Path) -> Non
             on_recording=lambda: _start_refine_check(settings, fetch),
         )
     except (ValueError, RuntimeError) as e:
-        session.stop(timeout=ERROR_STOP_TIMEOUT_SEC)
+        session.stop(timeout=ERROR_STOP_TIMEOUT_SEC, summary_timeout=0.0)
         _fatal(str(e))
     # ここに到達した時点で「WAV確定 → ストリーム停止」は完了済み。最後にライブ側をドレインする
     send_warning = external_send_warning(config.transcription_mode, config.format_mode)
@@ -238,18 +238,29 @@ def run_live(config: VoiceNoteConfig, device: str | None, dest_dir: Path) -> Non
 
 
 def _drain(session: LiveSession) -> LiveResult | None:
-    """残り区間を文字起こしして結果を返す。Ctrl+C なら None"""
+    """残り区間を文字起こしして結果を返す
+
+    Ctrl+C なら要約を打ち切り(cancel_summary)、それまでの区間と直前の要約で結果を作る
+    (GUI の「中断して保存」と同じ)。その間にもう一度 Ctrl+C されたら None(ノートを作らない)。
+    """
     console.print(
-        "[cyan]残りの区間を文字起こしし、最終要約を作成しています...（Ctrl+C で中断）[/cyan]"
+        "[cyan]残りの区間を文字起こしし、最終要約を作成しています..."
+        "（Ctrl+C で要約を打ち切って保存）[/cyan]"
     )
     try:
         # 再文字起こしの有無に関係なく全文要約まで作る。要約は stop の中で終わるか打ち切られる
         # (時間切れなら専用の cancel で以降の LLM 呼び出しを止める。送信中の1回だけは LLM 側の
-        # timeout まで続きうる)。上限は文字起こしの量に比例し、待ちは Ctrl+C で打ち切れる
+        # timeout まで続きうる)。上限は文字起こしの量に比例する
         return session.stop(timeout=SESSION_STOP_TIMEOUT_SEC)
     except KeyboardInterrupt:
         # record_audio は戻る前に SIGINT ハンドラを復元するため、ここでの Ctrl+C は
-        # KeyboardInterrupt になる。WAV は確定済みなのでノート生成だけを諦める
+        # KeyboardInterrupt になる。WAV は確定済み
+        pass
+    _warn("最終要約を中断しました。ここまでの区間と直前の要約でノートを保存します")
+    session.cancel_summary()
+    try:
+        return session.stop(timeout=ERROR_STOP_TIMEOUT_SEC, summary_timeout=0.0)
+    except KeyboardInterrupt:
         return None
 
 

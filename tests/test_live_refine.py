@@ -483,11 +483,12 @@ class TestFullSummaryTimeout:
             FULL_SUMMARY_SEC_PER_CALL,
             full_summary_timeout,
         )
+        from live.full_summary import FULL_SUMMARY_MARGIN_SEC as margin
 
         one = full_summary_timeout(("短い発話",))
-        assert one == max(FULL_SUMMARY_MIN_TIMEOUT_SEC, FULL_SUMMARY_SEC_PER_CALL * 2)
+        assert one == max(FULL_SUMMARY_MIN_TIMEOUT_SEC, FULL_SUMMARY_SEC_PER_CALL * 2) + margin
         five = full_summary_timeout(tuple("あ" * FULL_CHUNK_CHARS for _ in range(5)))
-        assert five == min(FULL_SUMMARY_MAX_TIMEOUT_SEC, FULL_SUMMARY_SEC_PER_CALL * 6)
+        assert five == min(FULL_SUMMARY_MAX_TIMEOUT_SEC, FULL_SUMMARY_SEC_PER_CALL * 6) + margin
         huge = full_summary_timeout(tuple("あ" * FULL_CHUNK_CHARS for _ in range(500)))
-        assert huge == FULL_SUMMARY_MAX_TIMEOUT_SEC
-        assert full_summary_timeout(()) == FULL_SUMMARY_MIN_TIMEOUT_SEC
+        assert huge == FULL_SUMMARY_MAX_TIMEOUT_SEC + margin
+        assert full_summary_timeout(()) == FULL_SUMMARY_MIN_TIMEOUT_SEC + margin

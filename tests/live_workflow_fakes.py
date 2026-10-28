@@ -297,6 +297,9 @@ class FakeSession:
         self.backlog_sec = 1.5
         self.dropped_chunks = 3
         self.asr_idle = True  # wait_asr_idle の戻り値
+        self.summary_timeouts: list[float | None] = []
+        self.summary_cancelled = threading.Event()
+        self.block_stop = False  # True なら stop() が cancel_summary まで返らない(要約待ちを模す)
 
     def start(self):
         self.log.append("session.start")
@@ -313,9 +316,16 @@ class FakeSession:
         self.log.append("session.wait_asr_idle")
         return self.asr_idle
 
-    def stop(self, timeout=30.0):
+    def cancel_summary(self):
+        self.log.append("session.cancel_summary")
+        self.summary_cancelled.set()
+
+    def stop(self, timeout=30.0, summary_timeout=None):
         self.log.append("session.stop")
         self.stop_timeouts.append(timeout)
+        self.summary_timeouts.append(summary_timeout)
+        if self.block_stop:
+            self.summary_cancelled.wait(timeout=5.0)
         if self.fail_stop:
             raise RuntimeError("stop 失敗")
         return self.result

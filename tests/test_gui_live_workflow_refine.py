@@ -18,6 +18,7 @@ from tests.live_workflow_fakes import (
     FakeFetcher,
     FakeRefine,
     Harness,
+    ImmediateThread,
     reset_deferred_threads,
     run_named,
 )
@@ -496,3 +497,94 @@ def test_plan_refine_error_still_saves_fast_note(tmp_path):
     assert h.state.phase is LivePhase.IDLE
     assert h.spy.done == [(h.wav, _fast_note(h))]
     assert h.refine.calls == []
+
+
+# ──────────────── レビュー指摘(3回目): 要約待ちの打ち切り ────────────────
+
+
+def _wait_until(predicate, timeout=3.0) -> bool:
+    import time
+
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return predicate()
+
+
+def test_abort_drain_cancels_summary_and_allows_restart(tmp_path):
+    h = _harness(tmp_path, config=_config(tmp_path, live_refine_enabled=False))
+    h.start()
+    session = h.sessions[0]
+    session.block_stop = True  # 要約待ちで止まるドレイン
+    h.wf._thread_factory = threading.Thread
+    h.wf.stop()
+    assert _wait_until(lambda: h.state.phase is LivePhase.DRAINING and session.stop_timeouts)
+    assert h.wf.abort_drain() is True
+    assert "session.cancel_summary" in h.log
+    # 放棄したドレインスレッドは要約の打ち切りですぐ終わり、再開始できる
+    assert _wait_until(lambda: h.state.phase is LivePhase.IDLE and not h.wf.is_active)
+    h.wf._thread_factory = ImmediateThread
+    assert h.start() is None
+
+
+def test_shutdown_during_drain_cancels_summary(tmp_path):
+    h = _harness(tmp_path, config=_config(tmp_path, live_refine_enabled=False))
+    h.start()
+    h.wf._thread_factory = DeferredThread
+    h.wf.stop()
+    run_named("live-stop")
+    assert h.state.phase is LivePhase.DRAINING
+    h.wf.shutdown()
+    assert "session.cancel_summary" in h.log
+
+
+def test_shutdown_while_recording_cancels_summary_and_skips_llm(tmp_path):
+    h = _harness(tmp_path)
+    h.start()
+    h.wf.shutdown()
+    session = h.sessions[0]
+    assert "session.cancel_summary" in h.log
+    assert session.summary_timeouts == [0.0]
+
+
+@pytest.mark.parametrize("case", ["no_audio", "prepare_fail", "emergency"])
+def test_error_paths_skip_final_summary(tmp_path, case):
+    if case == "no_audio":
+        h = _harness(tmp_path, finalized=None)
+        h.start()
+        h.wf.stop()
+    elif case == "prepare_fail":
+        h = _harness(tmp_path, fail_start=True)
+        h.start()
+    else:
+        h = _harness(tmp_path)
+        h.start()
+
+        def no_threads(*_a, **_k):
+            raise RuntimeError("can't start new thread")
+
+        h.wf._thread_factory = no_threads
+        h.wf.stop()
+    assert h.sessions[0].summary_timeouts == [0.0]
+
+
+def test_refine_thread_start_failure_finishes_with_fast_note(tmp_path):
+    h = _harness(tmp_path)
+    h.start()
+
+    class _NoStart(ImmediateThread):
+        def start(self):
+            raise RuntimeError("can't start new thread")
+
+    def factory(*args, **kwargs):
+        if kwargs.get("name") == "live-refine":
+            return _NoStart(*args, **kwargs)
+        return ImmediateThread(*args, **kwargs)
+
+    h.wf._thread_factory = factory
+    h.wf.stop()
+    assert h.state.phase is LivePhase.IDLE
+    assert h.spy.done == [(h.wav, _fast_note(h))]
+    assert h.wf.is_active is False

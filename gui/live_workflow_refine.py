@@ -287,7 +287,16 @@ class RefineLifecycle:
             self._drain_thread = thread
             self._update(set_phase, LivePhase.REFINING)
         self._safe(self._callbacks.on_log, "高精度モデルで録音全体を再文字起こししています...")
-        thread.start()
+        try:
+            thread.start()
+        except Exception as e:
+            # 速報版は保存済みなので、それで完了にする
+            _logger.error("再文字起こしの起動に失敗: %s", type(e).__name__)
+            with self._lock:
+                if self._drain_thread is thread:
+                    self._drain_thread = None
+            self._finish_run(run)
+            self._safe(self._callbacks.on_done, wav, note)
         return True
 
     def _refine_worker(self, run, job: RefineJob) -> None:

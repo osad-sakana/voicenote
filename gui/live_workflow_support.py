@@ -8,8 +8,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import threading
+import traceback
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -32,12 +34,15 @@ from note_writer import overwrite_live_note, save_live_note
 from recorder import ThreadedRecorder
 
 from .devices import parse_device_id
-from .live_state import LiveViewState
+from .live_state import LiveViewState, to_live_result
 
 _logger = logging.getLogger("voicenote")
 
 PROGRESS_INTERVAL_SEC = 0.25  # ダウンロード進捗バナーの更新間隔
 ENGINE_LOCK_TIMEOUT_SEC = 30.0  # load() が前回の実行の transcribe 完了を待つ上限
+ERROR_STOP_TIMEOUT_SEC = 2.0  # 失敗・取り消し時にセッションを解放する際の上限
+SHUTDOWN_FINALIZE_TIMEOUT_SEC = 1.0  # ウィンドウを閉じる時の WAV 確定の上限
+SHUTDOWN_JOIN_SEC = 1.0  # ウィンドウを閉じる時にストリーム停止を待つ猶予
 
 BANNER_MODEL_DOWNLOAD = "model_download"
 BANNER_ENGINE_FALLBACK = "engine_fallback"
@@ -296,3 +301,67 @@ def push_context(session, context: LiveContext) -> None:
 def always_allowed() -> bool:
     """can_start の既定値(常に開始を許可する)"""
     return True
+
+
+def cancel_session_summary(session) -> None:
+    """セッションの最終要約の待ちを打ち切る(cancel_summary が無い・失敗しても止めない)"""
+    cancel = getattr(session, "cancel_summary", None)
+    if not callable(cancel):
+        return
+    try:
+        cancel()
+    except Exception:
+        _logger.exception("ライブ要約の打ち切りに失敗しました")
+
+
+class ShutdownHelpers:
+    """LiveWorkflow の終了時・緊急停止の後始末(LiveWorkflow が継承する mixin)
+
+    LiveWorkflow の _stop_timeout / _thread_factory / _callbacks と、_safe / _finish_run /
+    _render_and_save を使う。セッションの停止は最終要約を作らない(summary_timeout=0.0)。
+    """
+
+    def _emergency_stop(self, run: Run, recorder, session) -> None:
+        """停止ワーカーを起動できない場合の最終手段。WAV 確定とマイク停止を同期で行う"""
+        wav = None
+        with contextlib.suppress(Exception):
+            wav = recorder.finalize_recording()
+        with contextlib.suppress(Exception):
+            recorder.stop_with_timeout(self._stop_timeout)
+        with contextlib.suppress(Exception):
+            session.stop(timeout=0.0, summary_timeout=0.0)
+        self._finish_run(run)
+        saved = f"（録音は {wav} に保存済みです）" if wav is not None else ""
+        self._safe(self._callbacks.on_error, f"予期せぬエラーが発生しました（停止処理）{saved}")
+
+    def _shutdown_recording(self, run: Run, recorder, session, state: LiveViewState) -> None:
+        wav = None
+        with contextlib.suppress(Exception):
+            wav = recorder.finalize_recording(timeout=SHUTDOWN_FINALIZE_TIMEOUT_SEC)
+        if wav is not None:
+            _logger.info("終了時にライブ録音を確定しました: %s", wav)
+            self._write_partial_note(run, state, session, wav)
+        cancel_session_summary(session)  # WAV 確定の後で要約の待ちを打ち切る
+
+        def _stop() -> None:
+            with contextlib.suppress(Exception):
+                recorder.stop_with_timeout(self._stop_timeout)
+            with contextlib.suppress(Exception):
+                session.stop(timeout=ERROR_STOP_TIMEOUT_SEC, summary_timeout=0.0)
+
+        with contextlib.suppress(Exception):
+            stopper = self._thread_factory(target=_stop, daemon=True, name="live-shutdown")
+            stopper.start()
+            stopper.join(SHUTDOWN_JOIN_SEC)
+
+    def _write_partial_note(self, run: Run, state: LiveViewState, session, wav) -> None:
+        """終了時の部分ノートを同期保存する(失敗はログのみ)"""
+        if wav is None:
+            return
+        result = to_live_result(state, dropped_chunks=dropped_chunks(session), complete=False)
+        try:
+            note = self._render_and_save(run, result, wav)
+        except Exception:
+            _logger.error("終了時のライブノート保存に失敗:\n%s", traceback.format_exc())
+            return
+        _logger.info("終了時にライブノートを保存しました: %s", note)

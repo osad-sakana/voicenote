@@ -648,6 +648,58 @@ class TestSummary:
         assert seen and seen[0].is_set()
         assert any("全文からの最終要約が時間内に終わらなかった" in w for w in rec.warnings)
 
+    def test_zero_summary_timeout_skips_llm_without_warning(self, gates):
+        """エラー・取り消し経路(summary_timeout=0)は LLM を呼ばずにすぐ戻る"""
+        rec = Recorder()
+        backend = FakeBackend()
+        session = make_session(FakeEngine(), backend=backend, rec=rec, clock=FakeClock(0.0))
+        session.start()
+        feed_audio(session, bursts(1))
+        assert wait_until(lambda: rec.summaries == [SUMMARY_TEXT])
+        backend.gate = gates()  # 以降の呼び出しは返らない
+        baseline = backend.calls
+        began = time.monotonic()
+        result = session.stop(timeout=0.2, summary_timeout=0.0)
+        assert time.monotonic() - began < 0.5
+        assert result.final_summary == SUMMARY_TEXT
+        assert backend.calls == baseline
+        assert not any("最終要約" in w for w in rec.warnings)
+
+    def test_cancel_summary_ends_waiting_stop_quickly(self, gates):
+        """要約待ちの stop は cancel_summary ですぐ戻り、ローリング要約への切り替えもしない"""
+        rec = Recorder()
+        backend = FakeBackend()
+        session = make_session(FakeEngine(), backend=backend, rec=rec, clock=FakeClock(0.0))
+        session.start()
+        feed_audio(session, bursts(1))
+        assert wait_until(lambda: rec.summaries == [SUMMARY_TEXT])
+        backend.gate = gates()
+        baseline = backend.calls
+        results: list = []
+        stopper = threading.Thread(target=lambda: results.append(session.stop(timeout=WAIT_SEC)))
+        stopper.start()
+        assert wait_until(lambda: backend.calls == baseline + 1)  # 全文要約の呼び出し中
+        began = time.monotonic()
+        session.cancel_summary()
+        session.cancel_summary()  # 冪等
+        stopper.join(timeout=2.0)
+        assert not stopper.is_alive()
+        assert time.monotonic() - began < 0.5
+        assert results[0].final_summary == SUMMARY_TEXT
+        assert backend.calls == baseline + 1  # ローリング要約へのフォールバックは呼ばない
+
+    def test_cancel_summary_before_stop(self):
+        backend = FakeBackend()
+        session = make_session(FakeEngine(), backend=backend, clock=FakeClock(0.0))
+        session.start()
+        feed_audio(session, bursts(1))
+        assert wait_until(lambda: backend.calls >= 1)
+        baseline = backend.calls
+        session.cancel_summary()
+        result = session.stop(timeout=WAIT_SEC)
+        assert backend.calls == baseline
+        assert result.final_summary == SUMMARY_TEXT
+
     def test_wait_asr_idle_true_after_stop(self):
         session = make_session(FakeEngine())
         session.start()

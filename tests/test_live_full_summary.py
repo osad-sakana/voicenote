@@ -66,6 +66,8 @@ def _user(messages):
 def _run(backend, texts, context=None, **kwargs):
     kwargs.setdefault("deadline", 100.0)
     kwargs.setdefault("clock", FakeClock())
+    # 見積もりでの省略は専用のテストで確かめる(ここでは 0 にして期限・cancel の挙動だけを見る)
+    kwargs.setdefault("sec_per_call", 0.0)
     return summarize_full(backend, texts, context, **kwargs)
 
 
@@ -297,26 +299,33 @@ class TestSummarizeFull:
             _run(FakeBackend(), ["発言"], max_chunk_chars=0)
 
 
-def test_skips_when_estimate_exceeds_max_timeout(caplog):
-    """必要時間の見積もり(呼び出し回数 × 1回あたり)が上限を超えるなら最初から試さない"""
-    from live.full_summary import FULL_SUMMARY_MAX_TIMEOUT_SEC, FULL_SUMMARY_SEC_PER_CALL
-
-    calls_needed = int(FULL_SUMMARY_MAX_TIMEOUT_SEC // FULL_SUMMARY_SEC_PER_CALL) + 1
-    texts = ["あ" * 8] * calls_needed  # 1塊1件 → 塊数 + 統合 が上限を超える
+def test_skips_when_estimate_exceeds_remaining_time(caplog):
+    """必要時間の見積もり(呼び出し回数 × 1回あたり)が残り時間を超えるなら最初から試さない"""
     backend = FakeBackend()
+    texts = ["あ" * 8, "い" * 8]  # 2塊 + 統合 = 3回
     with caplog.at_level("WARNING", logger="voicenote"):
-        assert _run(backend, texts, max_chunk_chars=10) is None
+        result = _run(
+            backend, texts, max_chunk_chars=10, sec_per_call=60.0, deadline=179.0, clock=FakeClock()
+        )
+    assert result is None
     assert backend.calls == []
-    assert any("長すぎる" in r.getMessage() for r in caplog.records)
+    assert any("省きます" in r.getMessage() for r in caplog.records)
     assert not any("あ" * 8 in r.getMessage() for r in caplog.records)
 
 
-def test_runs_when_estimate_is_within_max_timeout():
-    from live.full_summary import FULL_SUMMARY_MAX_TIMEOUT_SEC, FULL_SUMMARY_SEC_PER_CALL
+def test_runs_when_estimate_fits_remaining_time():
+    backend = FakeBackend(replies=(GOOD_SUMMARY, GOOD_SUMMARY, MERGED_SUMMARY))
+    texts = ["あ" * 8, "い" * 8]
+    result = _run(
+        backend, texts, max_chunk_chars=10, sec_per_call=60.0, deadline=180.0, clock=FakeClock()
+    )
+    assert result == MERGED_SUMMARY
 
-    chunks = (
-        int(FULL_SUMMARY_MAX_TIMEOUT_SEC // FULL_SUMMARY_SEC_PER_CALL) - 1
-    )  # 統合込みで上限ちょうど
-    replies = (GOOD_SUMMARY,) * chunks + (MERGED_SUMMARY,)
-    backend = FakeBackend(replies=replies)
-    assert _run(backend, ["あ" * 8] * chunks, max_chunk_chars=10) == MERGED_SUMMARY
+
+def test_default_estimate_uses_sec_per_call_constant():
+    from live.full_summary import FULL_SUMMARY_SEC_PER_CALL
+
+    backend = FakeBackend()
+    deadline = FULL_SUMMARY_SEC_PER_CALL * 2 - 1  # 1塊 + 統合1回分に1秒足りない
+    assert summarize_full(backend, ["発言"], None, deadline=deadline, clock=FakeClock()) is None
+    assert backend.calls == []
