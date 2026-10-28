@@ -229,7 +229,7 @@ class TestShutdown:
         assert h.log == []
 
     def test_shutdown_survives_save_failure(self, tmp_path):
-        def failing_saver(folder, body, audio_file=None):
+        def failing_saver(folder, body, audio_file=None, participants=()):
             raise RuntimeError("保存エラー")
 
         h = Harness(tmp_path, note_saver=failing_saver)

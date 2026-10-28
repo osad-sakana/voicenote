@@ -3,9 +3,30 @@
 from __future__ import annotations
 
 from . import theme
-from .live_layout import LivePanelWidgets
+from .live_context_form import ContextFormWidgets
+from .live_layout import (
+    COMPACT_GAPS,
+    NORMAL_GAPS,
+    SUMMARY_PAD_TOP,
+    TRANSCRIPT_PAD_TOP,
+    LivePanelWidgets,
+)
 from .live_state import LiveViewState
-from .live_view_logic import BannerView, MeterView, banner_view, plan_segment_render
+from .live_view_logic import (
+    BannerView,
+    MeterView,
+    TranscriptPreference,
+    TranscriptView,
+    banner_view,
+    has_room_for_line,
+    is_body_cramped,
+    plan_segment_render,
+    settle_preference,
+    summary_min_height,
+    toggle_preference,
+    transcript_min_height,
+    transcript_view,
+)
 
 
 class LivePanel:
@@ -17,6 +38,19 @@ class LivePanel:
         self._summary = ""
         self._banner: BannerView | None = None
         self._progress_indeterminate = False
+        self._transcript_pref = TranscriptPreference.AUTO
+        self._cramped = False
+        self._room_for_line = True
+        self._refused = False  # 表示を求められたが狭くて断った(窓が広がるまで理由を出す)
+        self._gaps = NORMAL_GAPS
+        self._transcript: TranscriptView | None = None
+        # 要約・文字起こし欄の割り当て高さが変わるたびに、文字起こしを自動で畳むか判定する
+        widgets.body.bind("<Configure>", self._on_body_configure, add="+")
+
+    @property
+    def context_form(self) -> ContextFormWidgets:
+        """参加者・メモ入力フォーム(clear() では消さない。実行をまたいで保持する)"""
+        return self._w.context_form
 
     # ──────────────── 表示/非表示 ────────────────
 
@@ -27,10 +61,89 @@ class LivePanel:
     def hide(self) -> None:
         self._w.frame.pack_forget()
 
+    @property
+    def transcript_collapsed(self) -> bool:
+        return self._transcript is not None and self._transcript.collapsed
+
+    def set_compact(self, compact: bool) -> None:
+        """小さい画面向けに参加者・メモ欄と間隔を詰め、要約欄に縦幅を回す"""
+        w = self._w
+        gaps = self._gaps = COMPACT_GAPS if compact else NORMAL_GAPS
+        w.context_form.set_compact(compact)
+        w.context_form.frame.pack_configure(pady=(gaps.section, 0))
+        w.body.pack_configure(pady=(gaps.section, 0))
+        for widget, gap in (
+            (w.banner_card, gaps.section),
+            (w.warning_label, gaps.warning),
+            (w.result_card, gaps.result),
+        ):
+            if widget.winfo_manager():
+                widget.pack_configure(pady=(gap, 0))
+
+    def toggle_transcript(self) -> bool:
+        """文字起こし欄を折りたたむ/戻す(折りたたむと要約欄がその分広がる)
+
+        窓が狭いため自動で隠している時も、見出し+1行分が入るなら表示し直せる(要約の
+        最小高さは保つ)。1行も入らない時は表示せず、ボタンに理由を出す。
+        戻り値: 表示を新たに断った(呼び出し側が詳細ログに1回だけ残す)なら True
+        """
+        result = toggle_preference(
+            self._transcript_pref, cramped=self._cramped, room_for_line=self._room_for_line
+        )
+        newly_refused = result.refused and not self._refused
+        self._transcript_pref = result.preference
+        self._refused = result.refused
+        self._apply_transcript()
+        return newly_refused
+
+    def _on_body_configure(self, _event=None) -> None:
+        w = self._w
+        # 割り当て高さは折りたたみ状態に依らない(窓の高さで決まる)ので、判定は振動しない
+        body_height = max(0, w.body.winfo_height())
+        fixed = w.body_header.winfo_reqheight()
+        summary_min = summary_min_height(theme.LIVE_SUMMARY_FONT_SIZE) + SUMMARY_PAD_TOP
+        section = w.transcript_section.winfo_reqheight()
+        self._cramped = is_body_cramped(
+            body_height,
+            fixed_height=fixed,
+            summary_min=summary_min,
+            transcript_height=section + TRANSCRIPT_PAD_TOP,
+        )
+        one_line = transcript_min_height(
+            section_height=section,
+            box_height=min(section, w.segments_box.winfo_reqheight()),
+            font_size=theme.LIVE_TRANSCRIPT_FONT_SIZE,
+        )
+        self._room_for_line = has_room_for_line(
+            body_height,
+            fixed_height=fixed,
+            summary_min=summary_min,
+            transcript_min=one_line + TRANSCRIPT_PAD_TOP,
+        )
+        if self._room_for_line:
+            self._refused = False
+        self._transcript_pref = settle_preference(
+            self._transcript_pref, cramped=self._cramped, room_for_line=self._room_for_line
+        )
+        self._apply_transcript()
+
+    def _apply_transcript(self) -> None:
+        view = transcript_view(self._transcript_pref, cramped=self._cramped, refused=self._refused)
+        if view == self._transcript:
+            return
+        w = self._w
+        self._transcript = view
+        w.transcript_toggle.configure(text=view.toggle_text)
+        if view.collapsed:
+            w.transcript_section.grid_remove()
+        elif not w.transcript_section.winfo_manager():
+            w.transcript_section.grid()
+            w.segments_box.see("end")
+
     # ──────────────── 状態 ────────────────
 
     def clear(self) -> None:
-        """次の実行に備えて区間・要約・バナー・警告・結果を消す"""
+        """次の実行に備えて区間・要約・バナー・警告・結果を消す(参加者・メモは残す)"""
         self._replace_text(self._w.segments_box, "")
         self._replace_text(self._w.summary_box, "")
         self._rendered_count = 0
@@ -88,7 +201,7 @@ class LivePanel:
             self._stop_indeterminate()
             progress.pack_forget()
         if not card.winfo_manager():
-            card.pack(fill="x", pady=(8, 0), before=self._w.body)
+            card.pack(fill="x", pady=(self._gaps.section, 0), before=self._w.context_form.frame)
 
     def _set_progress(self, fraction: float | None) -> None:
         progress = self._w.banner_progress
@@ -127,7 +240,9 @@ class LivePanel:
         label.configure(text=f"警告: {text}")
         if not label.winfo_manager():
             # 下端詰めなので、メーター行より前に積むとメーターの下に来る
-            label.pack(side="bottom", fill="x", pady=(4, 0), before=self._w.meter_row)
+            label.pack(
+                side="bottom", fill="x", pady=(self._gaps.warning, 0), before=self._w.meter_row
+            )
 
     def show_result(self, text: str, *, error: bool, can_retranscribe: bool) -> None:
         w = self._w
@@ -138,7 +253,7 @@ class LivePanel:
             w.retranscribe_btn.pack_forget()
         if not w.result_card.winfo_manager():
             below = w.warning_label if w.warning_label.winfo_manager() else w.meter_row
-            w.result_card.pack(side="bottom", fill="x", pady=(6, 0), before=below)
+            w.result_card.pack(side="bottom", fill="x", pady=(self._gaps.result, 0), before=below)
 
     def hide_result(self) -> None:
         self._w.result_card.pack_forget()

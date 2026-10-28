@@ -26,6 +26,7 @@ from pathlib import Path
 
 from config import VoiceNoteConfig
 from live.bootstrap import LiveSetupError, build_engine, build_vad, check_backend
+from live.context import LiveContext
 from live.level_meter import InputLevelAssessment, LevelMeter, assess_input_level, tee
 from live.model_fetch import describe_fetch_error
 from live.note import render_live_note
@@ -66,8 +67,10 @@ from .live_workflow_support import DownloadProgress as _DownloadProgress
 from .live_workflow_support import Run as _Run
 from .live_workflow_support import SerializedEngine as _SerializedEngine
 from .live_workflow_support import always_allowed as _always_allowed
+from .live_workflow_support import coerce_context as _coerce_context
 from .live_workflow_support import dropped_chunks as _dropped_chunks
 from .live_workflow_support import ollama_banner_text as _ollama_banner_text
+from .live_workflow_support import push_context as _push_context
 
 __all__ = [
     "BANNER_ENGINE_FALLBACK",
@@ -142,6 +145,8 @@ class LiveWorkflow:
         self._pending_close_recorder = None
         self._pending_close_since: float | None = None
         self._closed = False
+        # 参加者・メモ。実行をまたいで保持し(IDLE でも次回の開始で使う)、保存時は最新の値を使う
+        self._context = LiveContext()
 
     @property
     def state(self) -> LiveViewState:
@@ -159,6 +164,26 @@ class LiveWorkflow:
         """ライブ処理中、または放棄したドレインのスレッドがまだ生きていれば True"""
         with self._lock:
             return self._state.phase is not LivePhase.IDLE or self._abandoned_alive()
+
+    @property
+    def context(self) -> LiveContext:
+        """現在の参考情報(参加者・メモ)"""
+        with self._lock:
+            return self._context
+
+    def update_context(self, context: LiveContext | None) -> None:
+        """参考情報(参加者・メモ)を差し替える。どの段階で呼んでも安全
+
+        セッションがあれば次回の要約から反映し(変更だけでは要約を起動しない)、
+        ノートには保存時点の最新の値を書く。IDLE 中の値は次回の開始時に使う。None は空。
+        """
+        validated = _coerce_context(context)
+        with self._lock:
+            self._context = validated
+            session = self._session
+            # 呼び出し順のまま反映されるようロック下で渡す(set_context は短時間で戻る)
+            if session is not None:
+                _push_context(session, validated)
 
     def update_config(self, config: VoiceNoteConfig) -> None:
         """設定を差し替える(実行中のライブには影響せず、次回の開始から使う)"""
@@ -446,6 +471,7 @@ class LiveWorkflow:
             warn=lambda msg: self._banner(run, BANNER_VAD_FALLBACK, msg),
         )
         self._check_cancel(run)
+        context = self.context
         session = self._deps.session_factory(
             settings,
             engine=_SerializedEngine(
@@ -454,11 +480,14 @@ class LiveWorkflow:
             vad=detector,
             backend=backend,
             callbacks=self._session_callbacks(run),
+            context=context,
         )
         meter = self._deps.meter_factory()
         with self._lock:
             self._session = session
             self._meter = meter
+            if self._context is not context:  # セッション生成中に更新された
+                _push_context(session, self._context)
         # engine.load() は session の asr スレッドで行う(mlx は load と transcribe を同じスレッドで)
         session.start()
         self._check_cancel(run)
@@ -630,9 +659,12 @@ class LiveWorkflow:
     def _render_and_save(self, run: _Run, result: LiveResult, wav: Path) -> Path:
         config = run.config
         warning = external_send_banner_text(config.transcription_mode, config.format_mode)
-        body = render_live_note(result, wav, send_warning=warning)
+        context = self.context  # ドレイン中・終了直前の更新も含め、保存時点の最新の値
+        body = render_live_note(result, wav, send_warning=warning, context=context)
         folder = Path(config.save_folder).expanduser()
-        return self._deps.note_saver(folder, body, audio_file=wav)
+        return self._deps.note_saver(
+            folder, body, audio_file=wav, participants=context.participants
+        )
 
     def _save_note(self, run: _Run, result: LiveResult, wav: Path) -> None:
         """ライブノートを保存して IDLE に戻り、on_done / on_error を通知する"""

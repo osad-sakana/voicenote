@@ -6,9 +6,14 @@ from gui.constants import MODE_LIVE, MODE_RECORD_ONLY, MODE_RECORD_TRANSCRIBE, M
 from gui.mode_logic import (
     COMPACT_HEIGHT,
     EXPANDED_HEIGHT,
+    FIT_FLOOR_HEIGHT,
     LIVE_HEIGHT,
+    LIVE_MIN_HEIGHT,
     LIVE_WIDTH,
     NORMAL_WIDTH,
+    SCREEN_RESERVED_HEIGHT,
+    fit_to_screen,
+    live_screen_compact,
     normal_exec_spec,
     other_mode_rejection,
     resize_on_log_toggle,
@@ -41,6 +46,16 @@ class TestWindowSpec:
 
     def test_geometry_string(self):
         assert window_spec(MODE_LIVE, log_visible=False).geometry == f"{LIVE_WIDTH}x{LIVE_HEIGHT}"
+
+    def test_live_size(self):
+        # 幅は従来どおり。既定の高さは13インチ+ドックの画面(縦 約800px)に収める
+        assert LIVE_WIDTH == 760
+        assert LIVE_MIN_HEIGHT <= LIVE_HEIGHT <= 800
+
+    def test_live_min_height_fits_worst_case(self):
+        # 実App計測: バナー+入力レベル警告+上限案内(3項目)+完了表示を全部出し、文字起こしを
+        # 自動で折りたたんだ時の要求高さが 782px(要約欄は最小の3行分)。それを下回らない
+        assert LIVE_MIN_HEIGHT >= 782
 
     def test_previous_sizes_kept(self):
         # 従来の固定サイズを壊さない
@@ -99,3 +114,59 @@ class TestOtherModeRejection:
     def test_live_active_takes_priority_over_stream_closing(self):
         rejection = other_mode_rejection(live_active=True, live_stream_closing=True)
         assert rejection == other_mode_rejection(live_active=True)
+
+
+class TestFitToScreen:
+    """画面の縦が小さいとき、ウィンドウの高さを画面に合わせて縮める"""
+
+    def test_keeps_spec_when_screen_is_large(self):
+        spec = window_spec(MODE_LIVE, log_visible=False)
+        assert fit_to_screen(spec, 1050) is spec
+
+    def test_shrinks_height_and_min_height_on_small_screen(self):
+        spec = window_spec(MODE_LIVE, log_visible=False)
+        fitted = fit_to_screen(spec, 900)  # 13インチ標準の論理解像度
+        available = 900 - SCREEN_RESERVED_HEIGHT
+        assert fitted.height == available
+        assert fitted.min_height == available
+        assert fitted.width == spec.width
+        assert fitted.resizable is True
+
+    def test_min_height_not_raised_above_requested(self):
+        # 最小の高さは元の最小値を超えない(画面が少し足りないだけの場合)
+        spec = window_spec(MODE_LIVE, log_visible=False)
+        fitted = fit_to_screen(spec, LIVE_HEIGHT + SCREEN_RESERVED_HEIGHT - 5)
+        assert fitted.height == LIVE_HEIGHT - 5
+        assert fitted.min_height == min(LIVE_MIN_HEIGHT, LIVE_HEIGHT - 5)
+
+    def test_never_below_floor(self):
+        spec = window_spec(MODE_LIVE, log_visible=False)
+        assert fit_to_screen(spec, 300).height == FIT_FLOOR_HEIGHT
+
+    @pytest.mark.parametrize("height", [0, -1])
+    def test_unknown_screen_height_is_ignored(self, height):
+        spec = window_spec(MODE_LIVE, log_visible=False)
+        assert fit_to_screen(spec, height) is spec
+
+    @pytest.mark.parametrize("mode", _NORMAL_MODES)
+    def test_normal_modes_unchanged_on_normal_screens(self, mode):
+        spec = window_spec(mode, log_visible=True)
+        assert fit_to_screen(spec, 900) is spec
+
+
+class TestLiveScreenCompact:
+    """画面に合わせてライブ窓を縮めた時だけ、他の領域を詰めて要約欄を優先する"""
+
+    def test_compact_on_13inch_standard_screen(self):
+        assert live_screen_compact(900) is True
+
+    def test_not_compact_when_default_height_fits(self):
+        assert live_screen_compact(LIVE_HEIGHT + SCREEN_RESERVED_HEIGHT) is False
+        assert live_screen_compact(1050) is False
+
+    def test_compact_just_below_default(self):
+        assert live_screen_compact(LIVE_HEIGHT + SCREEN_RESERVED_HEIGHT - 1) is True
+
+    @pytest.mark.parametrize("height", [0, -1])
+    def test_unknown_screen_is_not_compact(self, height):
+        assert live_screen_compact(height) is False

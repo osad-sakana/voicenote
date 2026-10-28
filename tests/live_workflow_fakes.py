@@ -247,8 +247,11 @@ class FakeSession:
         log,
         result: LiveResult | None = None,
         fail_stop=False,
+        context=None,
     ):
         self.settings = settings
+        self.context = context  # 生成時の参考情報
+        self.context_updates: list = []  # set_context で受け取った参考情報
         self.engine = engine
         self.vad = vad
         self.backend = backend
@@ -272,6 +275,10 @@ class FakeSession:
 
     def feed(self, chunk):
         self.fed.append(chunk)
+
+    def set_context(self, context):
+        self.log.append("session.set_context")
+        self.context_updates.append(context)
 
     def stop(self, timeout=30.0):
         self.log.append("session.stop")
@@ -355,6 +362,7 @@ class Harness:
         self.recorders: list[FakeRecorder] = []
         self.sessions: list[FakeSession] = []
         self.saved_notes: list[tuple[Path, str, Path | None]] = []
+        self.saved_participants: list[tuple[str, ...]] = []
         self.spy = SpyCallbacks(self.log)
         deps = LiveDeps(
             recorder_factory=self._make_recorder,
@@ -392,7 +400,7 @@ class Harness:
         self.recorders.append(recorder)
         return recorder
 
-    def _make_session(self, settings, *, engine, vad, backend, callbacks):
+    def _make_session(self, settings, *, engine, vad, backend, callbacks, context=None):
         if self.session_factory_error is not None:
             raise self.session_factory_error
         session = FakeSession(
@@ -404,14 +412,16 @@ class Harness:
             self.log,
             result=self.session_result,
             fail_stop=self.session_fail_stop,
+            context=context,
         )
         self.sessions.append(session)
         return session
 
-    def _save_note(self, folder, body, audio_file=None):
+    def _save_note(self, folder, body, audio_file=None, participants=()):
         self.log.append("save")
         note = Path(folder) / f"note{len(self.saved_notes)}_live.md"
         self.saved_notes.append((Path(folder), body, audio_file))
+        self.saved_participants.append(tuple(participants))
         return note
 
     def start(self, device_id=1, label="[1] マイク"):

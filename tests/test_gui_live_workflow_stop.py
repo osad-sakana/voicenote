@@ -133,7 +133,7 @@ class TestStop:
         assert h.spy.done
 
     def test_note_save_failure_reports_wav_location(self, tmp_path):
-        def failing_saver(folder, body, audio_file=None):
+        def failing_saver(folder, body, audio_file=None, participants=()):
             raise RuntimeError("保存エラー: disk")
 
         h = Harness(tmp_path, note_saver=failing_saver)

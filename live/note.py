@@ -1,10 +1,13 @@
 """
 ライブ文字起こしノートの本文生成(純粋関数)
-本文 = 最終要約 + タイムスタンプ付きの区間テキスト
+本文 = 最終要約 + 参加者・メモ(入力があれば) + タイムスタンプ付きの区間テキスト
 """
+
+from __future__ import annotations
 
 from pathlib import Path
 
+from live.context import MAX_MEMO_CHARS, LiveContext
 from live.session_models import LiveResult
 
 _NO_SUMMARY = "（要約なし）"
@@ -47,10 +50,29 @@ def _quality_note(result: LiveResult, send_warning: str | None) -> str | None:
     return f"{note}\n> {send_warning}"
 
 
+def _context_sections(context: LiveContext | None) -> list[str]:
+    """参加者・メモの節(入力が空の項目は出さない)"""
+    if context is None:
+        return []
+    sections = []
+    if context.participants:
+        names = "\n".join(f"- {name}" for name in context.participants)
+        sections.append(f"## 参加者\n\n{names}")
+    if context.memo:
+        notice = (
+            f"> [!note] メモが長いため、先頭 {MAX_MEMO_CHARS} 文字のみ記録しています\n\n"
+            if context.memo_truncated
+            else ""
+        )
+        sections.append(f"## メモ\n\n{notice}{context.memo}")
+    return sections
+
+
 def render_live_note(
     result: LiveResult,
     wav_path: Path | None = None,
     send_warning: str | None = None,
+    context: LiveContext | None = None,
 ) -> str:
     """ライブ文字起こし結果を Markdown 本文(frontmatter なし)に変換する
 
@@ -58,11 +80,17 @@ def render_live_note(
         result: ライブ文字起こし結果
         wav_path: 録音 WAV のパス(指定時は本文に記載する)
         send_warning: `--file` 再文字起こしが外部送信する場合の警告(external_send_warning の戻り値)
+        context: 参加者・メモ。空でない項目だけ「## 参加者」「## メモ」節として要約の後に出す
+            (None・空なら従来と同一の出力)
     """
     summary = result.final_summary.strip() or _NO_SUMMARY
     lines = [f"- [{format_timestamp(s.start_sec)}] {s.text}" for s in result.segments]
     transcript = "\n".join(lines) if lines else _NO_SEGMENTS
-    sections = [f"## 要約\n\n{summary}", f"## 文字起こし\n\n{transcript}"]
+    sections = [
+        f"## 要約\n\n{summary}",
+        *_context_sections(context),
+        f"## 文字起こし\n\n{transcript}",
+    ]
     if wav_path is not None:
         sections.append(f"## 音声ファイル\n\n{wav_path}")
     note = _quality_note(result, send_warning)

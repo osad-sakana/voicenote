@@ -10,9 +10,17 @@ NORMAL_WIDTH = 520
 COMPACT_HEIGHT = 380  # 詳細ログを隠している時
 EXPANDED_HEIGHT = 560  # 詳細ログを表示している時
 LIVE_WIDTH = 760
-LIVE_HEIGHT = 640
+# 既定の高さ。縦が LIVE_HEIGHT + SCREEN_RESERVED_HEIGHT(940pt)以上の画面ならそのまま開く。
+# 実App計測(幅760)で、案内・警告が無ければ要約・文字起こしとも全て表示できる。
+# それより小さい画面(13インチ標準の縦900pt など)では fit_to_screen が縮める
+LIVE_HEIGHT = 800
 LIVE_MIN_WIDTH = 600
-LIVE_MIN_HEIGHT = 520
+# 最小の高さ。実App計測(幅760)で、案内バナー1件+入力レベル警告+上限案内(3項目すべて)+
+# 完了表示を出し、文字起こしを自動で折りたたんだ時の要求高さが 782px(要約欄は最小の3行分。
+# 見積りは gui/live_height.py)。この高さなら要約欄の最小高さ・実行ボタン・参加者・メモ欄・
+# メーター・完了表示が見切れない。案内バナーが3件同時に出ると 799px 必要で、既定の高さ(800)
+# なら収まる。ただし画面が小さく fit_to_screen で縮めた時は、この最小は保証しない
+LIVE_MIN_HEIGHT = 790
 
 
 @dataclass(frozen=True)
@@ -28,6 +36,41 @@ class WindowSpec:
     @property
     def geometry(self) -> str:
         return f"{self.width}x{self.height}"
+
+
+# メニューバー(約25)・タイトルバー(約28)・ドック(約80)で画面の縦から削られる分の見積り
+# (余裕を含めて140)。縦900pt の画面ではライブ窓は 900-140=760 になる
+SCREEN_RESERVED_HEIGHT = 140
+# 画面が小さくてもこれ未満にはしない(これ以下だと操作部が見切れる)
+FIT_FLOOR_HEIGHT = 560
+
+
+def fit_to_screen(spec: WindowSpec, screen_height: int) -> WindowSpec:
+    """画面の縦に収まらないとき、高さと最小の高さを画面に合わせて縮める
+
+    13インチの標準設定(論理 1440x900)では、既定の高さ(800)が入らず 760 に縮む。
+    縮めた場合、ライブ画面は他の領域を詰め(live_screen_compact)、文字起こしを自動で
+    折りたたんで要約を優先する。それでも縦が足りない画面・状態では、要約欄の最小3行分は
+    保証しない(gui/live_height.py の見積り)。画面の高さが不明(0以下)のときは何もしない。
+    """
+    if screen_height <= 0:
+        return spec
+    available = max(FIT_FLOOR_HEIGHT, screen_height - SCREEN_RESERVED_HEIGHT)
+    if spec.height <= available:
+        return spec
+    return WindowSpec(
+        spec.width,
+        available,
+        spec.resizable,
+        spec.min_width,
+        min(spec.min_height, available),
+    )
+
+
+def live_screen_compact(screen_height: int) -> bool:
+    """ライブ窓を画面に合わせて縮める画面か(縮める時は他の領域を詰めて要約欄を優先する)"""
+    spec = window_spec(MODE_LIVE, log_visible=False)
+    return fit_to_screen(spec, screen_height).height < spec.height
 
 
 def window_spec(mode: str, *, log_visible: bool) -> WindowSpec:

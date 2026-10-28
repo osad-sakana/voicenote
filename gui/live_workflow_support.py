@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -17,6 +18,7 @@ from typing import Any
 from config import VoiceNoteConfig
 from live import engines, local_llm, model_fetch, vad
 from live.bootstrap import BackendCheck
+from live.context import LiveContext
 from live.level_meter import ChunkSink, InputLevelAssessment, LevelMeter
 from live.model_fetch import ProgressCallback, RepoSpec
 from live.session import LiveSession
@@ -26,6 +28,8 @@ from recorder import ThreadedRecorder
 
 from .devices import parse_device_id
 from .live_state import LiveViewState
+
+_logger = logging.getLogger("voicenote")
 
 PROGRESS_INTERVAL_SEC = 0.25  # ダウンロード進捗バナーの更新間隔
 ENGINE_LOCK_TIMEOUT_SEC = 30.0  # load() が前回の実行の transcribe 完了を待つ上限
@@ -244,6 +248,23 @@ class DownloadProgress:
             return
         self._last_at = now
         self._report(format_download_progress(self._model, done, total))
+
+
+def coerce_context(context: LiveContext | None) -> LiveContext:
+    """update_context の引数を検証する。None は空の参考情報として扱う"""
+    if context is None:
+        return LiveContext()
+    if not isinstance(context, LiveContext):
+        raise TypeError(f"context は LiveContext が必要です: {type(context).__name__}")
+    return context
+
+
+def push_context(session, context: LiveContext) -> None:
+    """セッションへ参考情報を反映する。失敗してもライブは止めない(本文はログに出さない)"""
+    try:
+        session.set_context(context)
+    except Exception:
+        _logger.exception("ライブ要約の参考情報(参加者・メモ)を反映できませんでした")
 
 
 def always_allowed() -> bool:

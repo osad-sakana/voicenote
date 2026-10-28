@@ -24,7 +24,13 @@ from .constants import (
 from .devices import build_device_labels, parse_device_id
 from .layout import build_ui
 from .live_controller import LiveController, LiveWorkflowFactory
-from .mode_logic import WindowSpec, normal_exec_spec, other_mode_rejection, window_spec
+from .mode_logic import (
+    WindowSpec,
+    fit_to_screen,
+    normal_exec_spec,
+    other_mode_rejection,
+    window_spec,
+)
 from .settings_dialog import SettingsDialog
 from .ui_queue import ThreadSafeUIQueue
 from .workflow import (
@@ -110,7 +116,12 @@ class App(TkinterDnD.DnDWrapper, ctk.CTk):
         style = theme.DANGER_STYLE if danger else theme.PRIMARY_STYLE
         self._exec_btn.configure(text=text, state="normal", **style)
 
+    def screen_height(self) -> int:
+        """画面の縦(pt)。Tk の winfo_screenheight はメイン画面の論理高さで、窓がある画面とは限らない"""
+        return self.winfo_screenheight()
+
     def _apply_window(self, spec: WindowSpec):
+        spec = fit_to_screen(spec, self.screen_height())
         self.minsize(spec.min_width, spec.min_height)
         self.geometry(spec.geometry)
         self.resizable(spec.resizable, spec.resizable)

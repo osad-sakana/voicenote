@@ -413,3 +413,23 @@ class TestRollingSummarizer:
 
         assert summarizer.maybe_run(now=30.0) is True
         assert "最初の発言" in _user_content(backend.calls[-1])
+
+
+class TestFailureWarningHasNoDetails:
+    """バックエンド例外のメッセージは本文・URL・認証情報を含みうるので、型名だけを出す"""
+
+    def test_warning_and_log_show_type_name_only(self, caplog):
+        secret = "秘密の会議内容 token=sk-xxxx http://example.invalid"
+        warnings: list[str] = []
+        summarizer = _make(FakeBackend(error=ConnectionError(secret)), on_warning=warnings.append)
+        summarizer.add_text("A")
+        with caplog.at_level(logging.DEBUG, logger="voicenote"):
+            assert summarizer.maybe_run(now=0.0) is False
+        assert len(warnings) == 1
+        assert "ConnectionError" in warnings[0]
+        assert "前回の要約を維持" in warnings[0]
+        for text in (warnings[0], caplog.text):
+            assert "秘密" not in text
+            assert "sk-xxxx" not in text
+            assert "example.invalid" not in text
+        assert "ConnectionError" in caplog.text

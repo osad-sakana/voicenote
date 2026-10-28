@@ -52,6 +52,10 @@ elif _IS_WINDOWS:
 else:
     FONT_FAMILY = None
 
+# ライブ画面: 要約を主役として大きめに、速報の文字起こしは副として小さめに出す
+LIVE_SUMMARY_FONT_SIZE = 16
+LIVE_TRANSCRIPT_FONT_SIZE = 12
+
 
 def font(size: int = 13, weight: str = "normal") -> ctk.CTkFont:
     """OS 標準のシステムフォントを返す。"""
