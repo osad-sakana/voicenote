@@ -4,14 +4,19 @@ from __future__ import annotations
 
 from . import theme
 from .live_context_form import ContextFormWidgets
-from .live_layout import LivePanelWidgets
+from .live_layout import SUMMARY_PAD_TOP, TRANSCRIPT_PAD_TOP, LivePanelWidgets
 from .live_state import LiveViewState
 from .live_view_logic import (
     BannerView,
     MeterView,
+    TranscriptPreference,
+    TranscriptView,
     banner_view,
+    is_body_cramped,
     plan_segment_render,
-    transcript_toggle_text,
+    summary_min_height,
+    toggle_preference,
+    transcript_view,
 )
 
 
@@ -24,7 +29,11 @@ class LivePanel:
         self._summary = ""
         self._banner: BannerView | None = None
         self._progress_indeterminate = False
-        self._transcript_collapsed = False
+        self._transcript_pref = TranscriptPreference.AUTO
+        self._cramped = False
+        self._transcript: TranscriptView | None = None
+        # 要約・文字起こし欄の割り当て高さが変わるたびに、文字起こしを自動で畳むか判定する
+        widgets.body.bind("<Configure>", self._on_body_configure, add="+")
 
     @property
     def context_form(self) -> ContextFormWidgets:
@@ -42,20 +51,38 @@ class LivePanel:
 
     @property
     def transcript_collapsed(self) -> bool:
-        return self._transcript_collapsed
+        return self._transcript is not None and self._transcript.collapsed
 
     def toggle_transcript(self) -> None:
-        """文字起こし欄を折りたたむ/戻す(折りたたむと要約欄がその分広がる)"""
-        self.set_transcript_collapsed(not self._transcript_collapsed)
+        """文字起こし欄を折りたたむ/戻す(折りたたむと要約欄がその分広がる)
 
-    def set_transcript_collapsed(self, collapsed: bool) -> None:
+        窓が狭いため自動で隠している時も、押せば表示し直せる(要約の最小高さは保つ)。
+        """
+        self._transcript_pref = toggle_preference(self._transcript_pref, cramped=self._cramped)
+        self._apply_transcript()
+
+    def _on_body_configure(self, _event=None) -> None:
         w = self._w
-        self._transcript_collapsed = collapsed
-        w.transcript_toggle.configure(text=transcript_toggle_text(collapsed))
-        if collapsed:
-            w.segments_box.pack_forget()
-        elif not w.segments_box.winfo_manager():
-            w.segments_box.pack(fill="x", pady=(4, 0))
+        # 割り当て高さは折りたたみ状態に依らない(窓の高さで決まる)ので、判定は振動しない
+        self._cramped = is_body_cramped(
+            max(0, w.body.winfo_height()),
+            fixed_height=w.body_header.winfo_reqheight(),
+            summary_min=summary_min_height(theme.LIVE_SUMMARY_FONT_SIZE) + SUMMARY_PAD_TOP,
+            transcript_height=w.transcript_section.winfo_reqheight() + TRANSCRIPT_PAD_TOP,
+        )
+        self._apply_transcript()
+
+    def _apply_transcript(self) -> None:
+        view = transcript_view(self._transcript_pref, cramped=self._cramped)
+        if view == self._transcript:
+            return
+        w = self._w
+        self._transcript = view
+        w.transcript_toggle.configure(text=view.toggle_text)
+        if view.collapsed:
+            w.transcript_section.grid_remove()
+        elif not w.transcript_section.winfo_manager():
+            w.transcript_section.grid()
             w.segments_box.see("end")
 
     # ──────────────── 状態 ────────────────

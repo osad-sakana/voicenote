@@ -17,6 +17,7 @@ from live.context import (
     MAX_PARTICIPANT_CHARS,
     MAX_PARTICIPANTS,
     LiveContext,
+    clean_participant_name,
     parse_participants,
 )
 
@@ -59,10 +60,12 @@ def count_participants(text: str | None) -> int:
 
 
 def _has_long_name(text: str | None) -> bool:
+    """切り詰められる参加者名があるか(保存値と同じく、不可視文字を除いた後の長さで測る)"""
     if not text:
         return False
     return any(
-        len(piece.strip()) > MAX_PARTICIPANT_CHARS for piece in _PARTICIPANT_SEPARATORS.split(text)
+        len(clean_participant_name(piece)) > MAX_PARTICIPANT_CHARS
+        for piece in _PARTICIPANT_SEPARATORS.split(text)
     )
 
 
@@ -154,6 +157,17 @@ class ContextSync:
         """デバウンス待ちを取り消し、最新の入力を今すぐ反映する(ライブ開始・終了時)"""
         self._debouncer.cancel()
         self._sync(force=force)
+
+    def flush_pending(self, *, force: bool = False) -> bool:
+        """デバウンス待ちの編集がある時だけ、今すぐ反映する(停止・中断の直前)。反映したら True
+
+        macOS ではボタンがフォーカスを取らず入力欄の <FocusOut> が発火しないので、
+        フォーカスに頼らずここで送る。待ちが無ければ何も送らない。
+        """
+        if not self._debouncer.pending:
+            return False
+        self.flush(force=force)
+        return True
 
     def clear(self) -> None:
         """参考情報を空にする(入力欄を空にするのは呼び出し側)"""

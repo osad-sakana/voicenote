@@ -307,3 +307,53 @@ class TestContextSync:
         # 失敗した値は「送信済み」にしない(次の変更・開始時に再送する)
         sync.flush()
         assert len(notices) == 2
+
+
+class TestFlushPending:
+    """停止・中断の直前に呼ぶ: デバウンス待ちの編集だけを今すぐ送る"""
+
+    def test_pending_edit_is_pushed_now(self):
+        h = SyncHarness("田中", "")
+        h.sync.on_input_changed()
+        h.inputs = ("田中、佐藤", "議題")
+        assert h.sync.flush_pending(force=True) is True
+        assert h.pushed == [build_context("田中、佐藤", "議題")]
+        assert h.sched.pending == {}
+
+    def test_force_pushes_even_if_same_as_last(self):
+        h = SyncHarness("田中", "")
+        h.sync.flush()
+        h.sync.on_input_changed()
+        assert h.sync.flush_pending(force=True) is True
+        assert len(h.pushed) == 2
+
+    def test_nothing_pending_sends_nothing(self):
+        h = SyncHarness("田中", "")
+        h.sync.flush()
+        assert h.sync.flush_pending(force=True) is False
+        assert len(h.pushed) == 1
+
+    def test_nothing_pending_before_any_edit(self):
+        h = SyncHarness("田中", "")
+        assert h.sync.flush_pending(force=True) is False
+        assert h.pushed == []
+        assert h.notices == []
+
+
+class TestLongNameNoticeUsesNormalizedLength:
+    """上限案内の「切り詰めます」は保存値(正規化後)と食い違わない"""
+
+    def test_invisible_chars_do_not_count(self):
+        # 40文字 + ゼロ幅スペース: 保存値は40文字で切り詰められないので案内も出さない
+        name = "あ" * MAX_PARTICIPANT_CHARS + "​"
+        assert build_context(name, "").participants == ("あ" * MAX_PARTICIPANT_CHARS,)
+        assert limit_notice(name, "") is None
+
+    def test_control_chars_do_not_count(self):
+        name = "\x07" + "あ" * MAX_PARTICIPANT_CHARS
+        assert limit_notice(name, "") is None
+
+    def test_really_long_name_still_noticed(self):
+        name = "あ" * (MAX_PARTICIPANT_CHARS + 1) + "​"
+        notice = limit_notice(name, "")
+        assert notice is not None and "切り詰め" in notice

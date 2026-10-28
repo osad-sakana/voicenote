@@ -345,3 +345,126 @@ class TestTranscriptLayout:
 
         with pytest.raises(ValueError):
             textbox_height(lines, size)
+
+
+class TestTranscriptAutoCollapse:
+    """要約(主役)の最小高さを守るため、窓が狭い時は文字起こしを自動で折りたたむ"""
+
+    def _cramped(self, body_height, *, fixed=26, summary_min=83, transcript=100):
+        from gui.live_view_logic import is_body_cramped
+
+        return is_body_cramped(
+            body_height, fixed_height=fixed, summary_min=summary_min, transcript_height=transcript
+        )
+
+    def test_roomy_when_everything_fits(self):
+        assert self._cramped(26 + 83 + 100) is False
+        assert self._cramped(500) is False
+
+    def test_cramped_when_summary_would_drop_below_min(self):
+        assert self._cramped(26 + 83 + 100 - 1) is True
+        assert self._cramped(1) is True  # 配置前(高さ 1)も狭いとみなす
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"body_height": -1},
+            {"fixed": -1},
+            {"summary_min": 0},
+            {"transcript": -1},
+        ],
+    )
+    def test_invalid_values(self, kwargs):
+        from gui.live_view_logic import is_body_cramped
+
+        args = {"body_height": 100, "fixed": 26, "summary_min": 83, "transcript": 100, **kwargs}
+        with pytest.raises(ValueError):
+            is_body_cramped(
+                args["body_height"],
+                fixed_height=args["fixed"],
+                summary_min=args["summary_min"],
+                transcript_height=args["transcript"],
+            )
+
+    def test_summary_min_height_is_three_lines(self):
+        from gui.live_view_logic import SUMMARY_MIN_LINES, summary_min_height, textbox_height
+
+        assert SUMMARY_MIN_LINES == 3
+        assert summary_min_height(16) == textbox_height(3, 16)
+
+
+class TestTranscriptPreference:
+    """既定(AUTO)・利用者が隠した(HIDDEN)・狭くても表示(SHOWN)の遷移と表示"""
+
+    def test_default_is_auto(self):
+        from gui.live_view_logic import TranscriptPreference, transcript_view
+
+        view = transcript_view(TranscriptPreference.AUTO, cramped=False)
+        assert view.collapsed is False
+        assert view.toggle_text == "文字起こしを隠す"
+
+    def test_auto_collapses_when_cramped_and_says_so(self):
+        from gui.live_view_logic import TranscriptPreference, transcript_view
+
+        view = transcript_view(TranscriptPreference.AUTO, cramped=True)
+        assert view.collapsed is True
+        assert view.auto is True
+        assert "表示" in view.toggle_text
+        assert "自動" in view.toggle_text  # 自動で隠したことが分かる文言
+        assert view.toggle_text != "文字起こしを表示"
+
+    @pytest.mark.parametrize("cramped", [False, True])
+    def test_hidden_stays_hidden(self, cramped):
+        from gui.live_view_logic import TranscriptPreference, transcript_view
+
+        view = transcript_view(TranscriptPreference.HIDDEN, cramped=cramped)
+        assert view.collapsed is True
+        assert view.auto is False
+        assert view.toggle_text == "文字起こしを表示"
+
+    @pytest.mark.parametrize("cramped", [False, True])
+    def test_shown_stays_shown(self, cramped):
+        from gui.live_view_logic import TranscriptPreference, transcript_view
+
+        view = transcript_view(TranscriptPreference.SHOWN, cramped=cramped)
+        assert view.collapsed is False
+        assert view.toggle_text == "文字起こしを隠す"
+
+    def test_toggle_from_shown_hides(self):
+        from gui.live_view_logic import TranscriptPreference as P
+        from gui.live_view_logic import toggle_preference
+
+        assert toggle_preference(P.AUTO, cramped=False) is P.HIDDEN
+        assert toggle_preference(P.SHOWN, cramped=True) is P.HIDDEN
+        assert toggle_preference(P.SHOWN, cramped=False) is P.HIDDEN
+
+    def test_toggle_from_auto_collapsed_forces_show(self):
+        from gui.live_view_logic import TranscriptPreference as P
+        from gui.live_view_logic import toggle_preference
+
+        # 自動で隠れている時に押すと、狭くても表示し直せる
+        assert toggle_preference(P.AUTO, cramped=True) is P.SHOWN
+
+    def test_toggle_from_hidden(self):
+        from gui.live_view_logic import TranscriptPreference as P
+        from gui.live_view_logic import toggle_preference
+
+        assert toggle_preference(P.HIDDEN, cramped=False) is P.AUTO
+        assert toggle_preference(P.HIDDEN, cramped=True) is P.SHOWN
+
+    @pytest.mark.parametrize("cramped", [False, True])
+    def test_toggle_always_flips_visibility(self, cramped):
+        from gui.live_view_logic import TranscriptPreference, toggle_preference, transcript_view
+
+        for pref in TranscriptPreference:
+            before = transcript_view(pref, cramped=cramped).collapsed
+            after = transcript_view(toggle_preference(pref, cramped=cramped), cramped=cramped)
+            assert after.collapsed is (not before)
+
+    def test_invalid_preference(self):
+        from gui.live_view_logic import toggle_preference, transcript_view
+
+        with pytest.raises(TypeError):
+            transcript_view("auto", cramped=False)
+        with pytest.raises(TypeError):
+            toggle_preference(None, cramped=False)

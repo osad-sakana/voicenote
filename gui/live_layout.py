@@ -9,13 +9,21 @@ import customtkinter as ctk
 
 from . import theme
 from .live_context_form import ContextFormWidgets, build_context_form
-from .live_view_logic import TRANSCRIPT_LINES, textbox_height, transcript_toggle_text
+from .live_view_logic import (
+    SUMMARY_MIN_LINES,
+    TRANSCRIPT_LINES,
+    summary_min_height,
+    textbox_height,
+    transcript_toggle_text,
+)
 
 _METER_WIDTH = 160
 _WRAP_PX = 560  # バナー・結果の折り返し幅(ウィンドウ最小幅に合わせる)
-# 要約は要求高さを小さくし、余った縦幅は expand で要約欄に回す(主役)
-_SUMMARY_MIN_LINES = 3
-_TOGGLE_WIDTH = 120
+_TOGGLE_WIDTH = 120  # 最小幅(自動で隠した時の長い文言では文字に合わせて広がる)
+SUMMARY_PAD_TOP = 4
+TRANSCRIPT_PAD_TOP = 8
+# body の grid の行番号
+_ROW_HEADER, _ROW_SUMMARY, _ROW_TRANSCRIPT = 0, 1, 2
 
 
 @dataclass(frozen=True)
@@ -28,6 +36,7 @@ class LivePanelWidgets:
     banner_progress: ctk.CTkProgressBar
     context_form: ContextFormWidgets
     body: ctk.CTkFrame
+    body_header: ctk.CTkFrame
     summary_box: ctk.CTkTextbox
     transcript_section: ctk.CTkFrame
     transcript_toggle: ctk.CTkButton
@@ -88,8 +97,10 @@ def build_live_panel(parent, commands: LivePanelCommands) -> LivePanelWidgets:
     """ライブ画面を parent の中に構築して返す(frame 自体はまだ配置しない)
 
     上から 案内バナー → 参加者・メモ → 要約(主役) → 文字起こし(副・折りたたみ可)。
-    メーター・警告・結果は下端から詰め(side="bottom")、要約・文字起こし欄を最後に配置する。
-    ウィンドウが足りない時は文字起こし → 要約の順に縮み、下の行やボタンが隠れない。
+    メーター・警告・結果は下端から詰め(side="bottom")、要約・文字起こし欄(body)を最後に
+    配置するので、ウィンドウが足りない時は body だけが縮み、メーター・警告・完了表示は隠れない。
+    body の中では要約が最小の高さ(3行分)を保ち、文字起こしが先に縮む(gui/live_panel.py が
+    狭い時は文字起こしを自動で折りたたむ)。
     """
     frame = ctk.CTkFrame(parent, fg_color="transparent")
     banner_card, banner_label, banner_progress = _build_banner(frame)
@@ -97,7 +108,7 @@ def build_live_panel(parent, commands: LivePanelCommands) -> LivePanelWidgets:
     form.frame.pack(fill="x", pady=(8, 0))
     meter = _build_meter_row(frame)
     meter[0].pack(side="bottom", fill="x", pady=(6, 0))
-    body, summary_box, transcript = _build_body(frame, commands.on_toggle_transcript)
+    body, header, summary_box, transcript = _build_body(frame, commands.on_toggle_transcript)
     body.pack(fill="both", expand=True, pady=(8, 0))
     warning_label = ctk.CTkLabel(
         frame,
@@ -117,6 +128,7 @@ def build_live_panel(parent, commands: LivePanelCommands) -> LivePanelWidgets:
         banner_progress,
         form,
         body,
+        header,
         summary_box,
         *transcript,
         *meter,
@@ -145,13 +157,22 @@ def _build_banner(frame):
 
 
 def _build_body(frame, on_toggle: Callable[[], None]):
-    """要約(上・伸縮)と文字起こし(下・数行)。縦幅が足りない時は後に詰めた文字起こしから縮む
+    """要約(上・伸縮・最小3行分)と文字起こし(下・数行)を grid で並べる
 
+    要約の行だけに weight と minsize を付ける。余った縦幅は要約に回り、足りない時は
+    weight の無い文字起こしの行が下端から削られる(要約は最小の高さを下回らない)。
     折りたたみボタンは要約の見出し行に置き、文字起こし欄が縮んでも隠れないようにする。
     """
     body = ctk.CTkFrame(frame, fg_color="transparent")
+    body.grid_columnconfigure(0, weight=1)
+    body.grid_rowconfigure(
+        _ROW_SUMMARY,
+        weight=1,
+        minsize=summary_min_height(theme.LIVE_SUMMARY_FONT_SIZE) + SUMMARY_PAD_TOP,
+    )
+    body.grid_rowconfigure(_ROW_TRANSCRIPT, weight=0)
     header = ctk.CTkFrame(body, fg_color="transparent")
-    header.pack(fill="x")
+    header.grid(row=_ROW_HEADER, column=0, sticky="ew")
     _caption(header, "要約").pack(side="left")
     toggle = ctk.CTkButton(
         header,
@@ -164,14 +185,15 @@ def _build_body(frame, on_toggle: Callable[[], None]):
         **theme.SECONDARY_STYLE,
     )
     toggle.pack(side="right")
-    summary_box = _readonly_box(body, theme.LIVE_SUMMARY_FONT_SIZE, _SUMMARY_MIN_LINES)
-    summary_box.pack(fill="both", expand=True, pady=(4, 0))
+    # 要求高さは最小と同じ3行分。余った縦幅は grid の weight で要約に回す
+    summary_box = _readonly_box(body, theme.LIVE_SUMMARY_FONT_SIZE, SUMMARY_MIN_LINES)
+    summary_box.grid(row=_ROW_SUMMARY, column=0, sticky="nsew", pady=(SUMMARY_PAD_TOP, 0))
     section = ctk.CTkFrame(body, fg_color="transparent")
-    section.pack(fill="x", pady=(8, 0))
+    section.grid(row=_ROW_TRANSCRIPT, column=0, sticky="ew", pady=(TRANSCRIPT_PAD_TOP, 0))
     _caption(section, "文字起こし（速報）").pack(fill="x")
     segments_box = _readonly_box(section, theme.LIVE_TRANSCRIPT_FONT_SIZE, TRANSCRIPT_LINES)
     segments_box.pack(fill="x", pady=(4, 0))
-    return body, summary_box, (section, toggle, segments_box)
+    return body, header, summary_box, (section, toggle, segments_box)
 
 
 def _build_meter_row(frame):

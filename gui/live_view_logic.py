@@ -196,13 +196,19 @@ def result_text(wav: Path, note: Path | None) -> str:
 
 
 TRANSCRIPT_LINES = 3  # 文字起こし(副表示)の高さ。要約に縦幅を回すため数行だけにする
+SUMMARY_MIN_LINES = 3  # 要約(主役)はウィンドウが狭くてもこの行数分の高さを保つ
 _LINE_SPACING = 1.4  # フォントサイズに対する1行の高さの目安
 _TEXTBOX_PAD_PX = 12  # テキストボックス上下の内側余白
+_TOGGLE_HIDE = "文字起こしを隠す"
+_TOGGLE_SHOW = "文字起こしを表示"
+_TOGGLE_SHOW_AUTO = "文字起こしを表示（狭いため自動で非表示）"
 
 
-def transcript_toggle_text(collapsed: bool) -> str:
-    """文字起こしの折りたたみボタンの文言"""
-    return "文字起こしを表示" if collapsed else "文字起こしを隠す"
+def transcript_toggle_text(collapsed: bool, *, auto: bool = False) -> str:
+    """文字起こしの折りたたみボタンの文言(auto: 窓が狭いため自動で隠している)"""
+    if not collapsed:
+        return _TOGGLE_HIDE
+    return _TOGGLE_SHOW_AUTO if auto else _TOGGLE_SHOW
 
 
 def textbox_height(lines: int, font_size: int) -> int:
@@ -210,3 +216,64 @@ def textbox_height(lines: int, font_size: int) -> int:
     if lines <= 0 or font_size <= 0:
         raise ValueError(f"lines と font_size は正の値が必要です: {lines}, {font_size}")
     return round(lines * font_size * _LINE_SPACING) + _TEXTBOX_PAD_PX
+
+
+def summary_min_height(font_size: int) -> int:
+    """要約欄が保つ最小の高さ(px)。SUMMARY_MIN_LINES 行分"""
+    return textbox_height(SUMMARY_MIN_LINES, font_size)
+
+
+def is_body_cramped(
+    body_height: int, *, fixed_height: int, summary_min: int, transcript_height: int
+) -> bool:
+    """要約・文字起こし欄に割り当てられた高さでは、文字起こしを出すと要約が最小を下回るか
+
+    body_height: 要約・文字起こし欄全体に割り当てられた高さ(折りたたみ状態に依らない)
+    fixed_height: 見出し行など常に出す部分の高さ
+    summary_min: 要約欄の最小の高さ(余白込み)
+    transcript_height: 文字起こし欄(見出し・余白込み)の要求高さ
+    """
+    if body_height < 0 or fixed_height < 0 or transcript_height < 0 or summary_min <= 0:
+        raise ValueError(
+            f"高さが不正です: {body_height}, {fixed_height}, {summary_min}, {transcript_height}"
+        )
+    return body_height < fixed_height + summary_min + transcript_height
+
+
+class TranscriptPreference(Enum):
+    """文字起こし欄の表示の希望(折りたたみボタンで切り替える)"""
+
+    AUTO = "auto"  # 既定: 窓が狭い時だけ自動で隠す
+    HIDDEN = "hidden"  # 利用者が隠した
+    SHOWN = "shown"  # 利用者が表示を選んだ(狭くても表示する。要約の最小高さは保つ)
+
+
+@dataclass(frozen=True)
+class TranscriptView:
+    collapsed: bool
+    auto: bool  # 窓が狭いため自動で隠している
+    toggle_text: str
+
+
+def _require_preference(pref: Any) -> TranscriptPreference:
+    if not isinstance(pref, TranscriptPreference):
+        raise TypeError(f"TranscriptPreference が必要です: {pref!r}")
+    return pref
+
+
+def transcript_view(pref: TranscriptPreference, *, cramped: bool) -> TranscriptView:
+    """表示の希望と窓の狭さから、文字起こし欄を隠すか・ボタンの文言を決める"""
+    pref = _require_preference(pref)
+    auto = pref is TranscriptPreference.AUTO and cramped
+    collapsed = pref is TranscriptPreference.HIDDEN or auto
+    return TranscriptView(collapsed, auto, transcript_toggle_text(collapsed, auto=auto))
+
+
+def toggle_preference(pref: TranscriptPreference, *, cramped: bool) -> TranscriptPreference:
+    """折りたたみボタンを押した後の希望。押すたびに見た目(表示/非表示)が必ず反転する
+
+    表示中 → 隠す。隠れている時 → 窓が狭ければ強制表示(SHOWN)、広ければ既定(AUTO)に戻す。
+    """
+    if not transcript_view(pref, cramped=cramped).collapsed:
+        return TranscriptPreference.HIDDEN
+    return TranscriptPreference.SHOWN if cramped else TranscriptPreference.AUTO

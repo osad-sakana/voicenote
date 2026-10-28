@@ -161,3 +161,45 @@ class TestFromInputs:
     def test_rejects_non_string_memo(self):
         with pytest.raises(TypeError):
             LiveContext.from_inputs("", 1)
+
+
+ZWJ = "‍"
+FAMILY = f"👨{ZWJ}👩{ZWJ}👧"
+HEART = "❤️"  # 異体字セレクタ(Mn)付き
+KEYCAP = "1️⃣"
+SKIN = "👍🏽"
+
+
+class TestInvisibleAndBrokenCharacters:
+    """ノート保存(UTF-8)で落ちる孤立サロゲートと、見えない書式文字(Cf)を除く"""
+
+    def test_lone_surrogate_is_removed(self):
+        assert LiveContext(("\ud83d",)).participants == ()
+        assert LiveContext(("田\ud83d中",)).participants == ("田中",)
+        assert LiveContext(memo="メモ\udc00").memo == "メモ"
+
+    def test_paired_surrogates_become_the_character(self):
+        # 正しく対になったサロゲートは本来の文字(絵文字)として残す
+        paired = chr(0xD83D) + chr(0xDE00)  # U+1F600 をサロゲート対で表したもの
+        assert LiveContext((paired,)).participants == ("\U0001f600",)
+
+    def test_saved_note_with_lone_surrogate_does_not_crash(self, tmp_path):
+        from note_writer import save_live_note
+
+        ctx = LiveContext(("\ud83d",), memo="\udc00メモ")
+        body = "\n".join((*ctx.participants, ctx.memo))
+        path = save_live_note(tmp_path, body, participants=ctx.participants)
+        assert "メモ" in path.read_text(encoding="utf-8")
+
+    @pytest.mark.parametrize(
+        "ch",
+        ["​", "﻿", "⁠", "­", "‌", "\U000e0041", RLO],
+    )
+    def test_format_characters_are_removed(self, ch):
+        assert parse_participants(f"田{ch}中") == ("田中",)
+        assert LiveContext(memo=f"議{ch}題").memo == "議題"
+
+    @pytest.mark.parametrize("emoji", [FAMILY, HEART, KEYCAP, SKIN])
+    def test_emoji_sequences_are_kept(self, emoji):
+        assert parse_participants(f"田中{emoji}") == (f"田中{emoji}",)
+        assert LiveContext(memo=f"メモ{emoji}").memo == f"メモ{emoji}"

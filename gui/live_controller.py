@@ -145,8 +145,11 @@ class LiveController:
         if action is ButtonAction.START:
             self._start()
         elif action is ButtonAction.STOP:
+            # 停止・中断の直前の編集もノートと最終要約に入れる(フォーカス移動に頼らない)
+            self._context_sync.flush_pending(force=True)
             self._workflow.stop()
         elif action is ButtonAction.ABORT:
+            self._context_sync.flush_pending(force=True)
             self._workflow.abort_drain()
 
     def _start(self) -> None:

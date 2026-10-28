@@ -15,25 +15,42 @@ MAX_PARTICIPANT_CHARS = 40  # 1人あたりの最大文字数（超えた分は�
 MAX_MEMO_CHARS = 2000  # メモの最大文字数（先頭側を残す）
 
 _PARTICIPANT_SEPARATORS = re.compile(r"[、，,\r\n]")
-# 表示順を入れ替えて見た目を偽装できる双方向制御文字（Cf のうち除去するもの）
-_BIDI_CONTROLS = frozenset(
-    chr(code) for code in (0x061C, 0x200E, 0x200F, *range(0x202A, 0x202F), *range(0x2066, 0x206A))
-)
+# 書式文字（Cf）のうち残すもの。ZWJ は絵文字の結合（👨‍👩‍👧 など）に必要。
+# 異体字セレクタ（U+FE0F など）・肌色修飾は Cf ではないので元から除去対象にならない。
+# それ以外の Cf（ゼロ幅スペース・BOM・双方向制御・タグ文字など）は見えない文字で
+# 表示の偽装や隠れた指示の埋め込みに使えるので除く（タグ文字を使う地域旗は黒旗になる）
+_KEEP_FORMAT = frozenset("\u200d")
+_REMOVED_CATEGORIES = frozenset(("Cc", "Cf", "Cs"))
+
+
+def _join_surrogates(text: str) -> str:
+    """対になったサロゲートを本来の文字にまとめる（孤立したものはそのまま残る）"""
+    return text.encode("utf-16-le", "surrogatepass").decode("utf-16-le", "surrogatepass")
 
 
 def _remove_controls(text: str, keep: frozenset[str] = frozenset()) -> str:
-    """制御文字（Cc）と双方向制御文字を除去する。keep に含む文字は残す"""
+    """制御文字（Cc）・書式文字（Cf。ZWJ は残す）・孤立サロゲート（Cs）を除去する
+
+    孤立サロゲートは UTF-8 で書けずノート保存が失敗するため除く。keep に含む文字は残す。
+    """
     return "".join(
         ch
-        for ch in text
-        if ch in keep or (unicodedata.category(ch) != "Cc" and ch not in _BIDI_CONTROLS)
+        for ch in _join_surrogates(text)
+        if ch in keep or ch in _KEEP_FORMAT or unicodedata.category(ch) not in _REMOVED_CATEGORIES
     )
 
 
+def clean_participant_name(name: str) -> str:
+    """参加者名1件から除去対象の文字と前後の空白を除く（文字数の上限を掛ける前）
+
+    上限超過の案内（gui/live_context_logic.py）が保存値と同じ基準で長さを測るために使う。
+    """
+    return _remove_controls(name).strip()
+
+
 def _normalize_name(name: str) -> str:
-    """参加者名1件を正規化する（制御文字除去・前後空白除去・最大文字数で切り詰め）"""
-    cleaned = _remove_controls(name).strip()
-    return cleaned[:MAX_PARTICIPANT_CHARS].strip()
+    """参加者名1件を正規化する（不可視文字の除去・前後空白除去・最大文字数で切り詰め）"""
+    return clean_participant_name(name)[:MAX_PARTICIPANT_CHARS].strip()
 
 
 def _normalize_names(names) -> tuple[str, ...]:
@@ -66,8 +83,8 @@ def parse_participants(text: str | None) -> tuple[str, ...]:
 def _normalize_memo(memo: str) -> tuple[str, bool]:
     """メモを正規化する。(正規化後のメモ, 切り詰めたか) を返す
 
-    改行を \\n に統一し、改行・タブ以外の制御文字を除き、前後の空白を除いてから
-    先頭 MAX_MEMO_CHARS 文字を残す。
+    改行を \\n に統一し、改行・タブ以外の制御文字・不可視の書式文字・孤立サロゲートを除き、
+    前後の空白を除いてから先頭 MAX_MEMO_CHARS 文字を残す。
     """
     unified = memo.replace("\r\n", "\n").replace("\r", "\n")
     cleaned = _remove_controls(unified, keep=frozenset("\n\t")).strip()
