@@ -174,7 +174,7 @@ class LiveSession:
         else:
             self._pending_gap_samples = gap + len(chunk)
 
-    def stop(self, timeout: float = 30.0) -> LiveResult:
+    def stop(self, timeout: float = 30.0, rebuild_summary: bool = True) -> LiveResult:
         """
         セッションを終了して結果を返す。全体で最大 timeout 秒(実時間)で戻る。
 
@@ -183,6 +183,9 @@ class LiveSession:
         3. 区間キューを文字起こしし切る(ドレイン)
         4. 全文から最終要約を作り直す。失敗・時間切れならローリング要約を1回試み、
            それも駄目なら直前の要約を使う
+
+        rebuild_summary=False なら 4 の全文要約を省き、ローリング要約だけで締める
+        (停止後に高精度の再文字起こしを予定し、LLM とメモリを奪い合わないようにする場合)。
         """
         if self._result is not None:
             return self._result
@@ -191,7 +194,7 @@ class LiveSession:
         if not self._threads:
             self._segmenter_done.set()
         complete = self._drain(deadline)
-        final_summary = self._finish_summary(deadline)
+        final_summary = self._finish_summary(deadline, rebuild_summary)
         with self._lock:
             self._result = LiveResult(
                 segments=self._results,
@@ -201,6 +204,14 @@ class LiveSession:
                 complete=complete,
             )
         return self._result
+
+    def wait_asr_idle(self, timeout: float) -> bool:
+        """asr スレッドの終了を最大 timeout 秒待つ。終わっていれば(未開始も)True
+
+        stop が時間切れでも asr スレッドは処理中の区間を終えるまで動くため、エンジンを
+        解放する前にこれで待つ。
+        """
+        return self._join("live-asr", time.monotonic() + timeout)
 
     # ------------------------------------------------------------ 停止処理
 
@@ -220,7 +231,7 @@ class LiveSession:
             self._warn("時間内に文字起こしできなかった区間があります（WAVファイルは保存済みです）")
         return done
 
-    def _finish_summary(self, deadline: float) -> str:
+    def _finish_summary(self, deadline: float, rebuild_summary: bool = True) -> str:
         """周期要約を止め、最終要約を timeout 付きで作る(全文要約 → ローリング要約の順に試す)"""
         summarizer = self._summarizer
         if summarizer is None:
@@ -229,7 +240,7 @@ class LiveSession:
         if not self._join("live-summary", deadline):
             return summarizer.summary
         before = summarizer.summary
-        full = self._summarize_full(deadline)
+        full = self._summarize_full(deadline) if rebuild_summary else None
         if full:
             if full != before:
                 _safe_call(self._callbacks.on_summary, full)

@@ -5,6 +5,8 @@ record_audio / LiveSession / create_engine / ローカルLLM はすべてモッ�
 
 import io
 import sys
+import types
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -14,6 +16,7 @@ from rich.console import Console
 import live_cli
 import main_cli
 from config import VoiceNoteConfig
+from live.refine import RefineResult
 from live.session_models import LiveResult, LiveSegment
 from live.view import LiveView
 
@@ -57,7 +60,15 @@ def env(monkeypatch, tmp_path):
         dropped_chunks=0,
     )
     session = MagicMock(name="session")
-    session.stop.side_effect = lambda timeout=None: events.append("session.stop") or result
+    stop_kwargs: list[dict] = []
+
+    def stop(timeout=None, **kwargs):
+        events.append("session.stop")
+        stop_kwargs.append(kwargs)
+        return result
+
+    session.stop.side_effect = stop
+    session.wait_asr_idle.return_value = True
     session.start.side_effect = lambda: events.append("session.start")
     session_cls = MagicMock(return_value=session)
     monkeypatch.setattr(live_cli, "LiveSession", session_cls)
@@ -106,6 +117,9 @@ def env(monkeypatch, tmp_path):
     e.engine_errors = engine_errors
     e.session = session
     e.session_cls = session_cls
+    e.stop_kwargs = stop_kwargs
+    e.saved_note = saved_note
+    e.result = result
     e.record_kwargs = record_kwargs
     e.note_bodies = note_bodies
     e.note_audio_files = note_audio_files
@@ -162,7 +176,7 @@ class TestRunLiveOrder:
         assert "local / rule" in text
 
     def test_note_quality_warning_mentions_external_send(self, env):
-        env.session.stop.side_effect = lambda timeout=None: LiveResult(
+        env.session.stop.side_effect = lambda timeout=None, **_kw: LiveResult(
             segments=(), final_summary="", dropped_chunks=2
         )
         config = VoiceNoteConfig(save_folder=env.config.save_folder, transcription_mode="openai")
@@ -174,7 +188,7 @@ class TestInterruptDuringStop:
     """record_audio が SIGINT ハンドラを戻した後の Ctrl+C(session.stop 中)"""
 
     def _interrupt(self, env):
-        def stop(timeout=None):
+        def stop(timeout=None, **_kw):
             env.events.append("session.stop")
             raise KeyboardInterrupt
 
@@ -503,3 +517,229 @@ class TestLoadTimeFallback:
         live_cli.run_live(env.config, None, env.dest)
         engine = env.session_cls.call_args.kwargs["engine"]
         assert not isinstance(engine, live_cli.FallbackOnLoadEngine)
+
+
+# ──────────────── 停止後の高精度再文字起こし ────────────────
+
+
+class FakeModelFetch:
+    """live_cli.model_fetch の代役(通信しない)"""
+
+    def __init__(self, cached=True, fetch_error: Exception | None = None):
+        self.cached = cached
+        self.fetch_error = fetch_error
+        self.fetched: list = []
+
+    def resolve_repo(self, engine, model):
+        return f"repo/{engine}/{model}"
+
+    def is_cached(self, repo):
+        return self.cached
+
+    def fetch(self, repo, on_progress):
+        on_progress(0, 0)
+        on_progress(50, 100)
+        if self.fetch_error is not None:
+            raise self.fetch_error
+        self.fetched.append(repo)
+        self.cached = True
+        return "/cache"
+
+    def describe_fetch_error(self, exc, required_bytes=None):
+        return types.SimpleNamespace(message="取得できませんでした")
+
+
+@pytest.fixture
+def refine_env(env, monkeypatch):
+    """mlx + 再文字起こし有効の設定と、refine_wav / overwrite / summarize_full の偽物"""
+    fetch = FakeModelFetch()
+    monkeypatch.setattr(live_cli, "model_fetch", fetch)
+    refine_calls: list[dict] = []
+    overwrites: list[tuple[Path, str, bool]] = []
+    summaries: list[tuple[str, ...]] = []
+
+    def refine_wav(wav, make_engine, release_live, **kwargs):
+        env.events.append("refine_wav")
+        refine_calls.append({"wav": wav, **kwargs})
+        release_live()
+        kwargs["on_progress"](0.0, 2.0, None)
+        kwargs["on_progress"](2.0, 2.0, 0.0)
+        segments = (LiveSegment(0, 0.0, 2.0, "高精度の発話"),)
+        return RefineResult(segments, True, 1.0)
+
+    def overwrite(path, body, participants=(), refined=False):
+        env.events.append("overwrite_live_note")
+        overwrites.append((path, body, refined))
+        return path
+
+    def summarize_full(backend, texts, context, **kwargs):
+        summaries.append(tuple(texts))
+        return "現在の話題: 高精度の要約"
+
+    monkeypatch.setattr(live_cli, "refine_wav", refine_wav)
+    monkeypatch.setattr(live_cli, "overwrite_live_note", overwrite)
+    monkeypatch.setattr(live_cli, "summarize_full", summarize_full)
+    env.session.wait_asr_idle.side_effect = lambda timeout: (
+        env.events.append("wait_asr_idle") or True
+    )
+    env.fetch = fetch
+    env.refine_calls = refine_calls
+    env.overwrites = overwrites
+    env.summaries = summaries
+    env.config = VoiceNoteConfig(
+        save_folder=env.config.save_folder,
+        live_engine="mlx",
+        live_whisper_model="large-v3-turbo",
+        live_refine_enabled=True,
+    )
+    return env
+
+
+class TestRefine:
+    def test_order_fast_note_then_refine_then_overwrite(self, refine_env):
+        live_cli.run_live(refine_env.config, None, refine_env.dest)
+        assert refine_env.events == [
+            "session.start",
+            "record_audio",
+            "on_saved",
+            "session.stop",
+            "save_live_note",
+            "wait_asr_idle",
+            "refine_wav",
+            "overwrite_live_note",
+        ]
+        assert refine_env.stop_kwargs == [{"rebuild_summary": False}]
+
+    def test_overwritten_note_has_both_transcripts_and_new_summary(self, refine_env):
+        live_cli.run_live(refine_env.config, None, refine_env.dest)
+        path, body, refined = refine_env.overwrites[0]
+        assert path == refine_env.saved_note
+        assert refined is True
+        assert "## 文字起こし（高精度: large-v3）" in body
+        assert "高精度の発話" in body
+        assert "## ライブ文字起こし（速報）" in body
+        assert "テスト発話" in body
+        assert "高精度の要約" in body
+        assert refine_env.summaries == [("高精度の発話",)]
+        assert "高精度版で上書きしました" in refine_env.out.getvalue()
+
+    def test_refine_uses_settings_language_and_wav(self, refine_env):
+        config = replace(refine_env.config, live_language="ja")
+        live_cli.run_live(config, None, refine_env.dest)
+        call = refine_env.refine_calls[0]
+        assert call["wav"] == refine_env.wav
+        assert call["language"] == "ja"
+        assert call["hint"] is None
+
+    def test_release_live_unloads_realtime_engine(self, refine_env):
+        live_cli.run_live(refine_env.config, None, refine_env.dest)
+        engine = refine_env.session_cls.call_args.kwargs["engine"]
+        assert isinstance(engine, live_cli.FallbackOnLoadEngine)
+        engine._active.unload.assert_called_once()
+
+    def test_progress_is_printed(self, refine_env):
+        live_cli.run_live(refine_env.config, None, refine_env.dest)
+        assert "100%" in refine_env.out.getvalue()
+
+    def test_summary_failure_keeps_live_summary(self, refine_env, monkeypatch):
+        monkeypatch.setattr(live_cli, "summarize_full", lambda *a, **k: None)
+        live_cli.run_live(refine_env.config, None, refine_env.dest)
+        body = refine_env.overwrites[0][1]
+        assert "要約" in body and "高精度の要約" not in body
+
+    def test_disabled_does_not_refine(self, refine_env):
+        config = replace(refine_env.config, live_refine_enabled=False)
+        live_cli.run_live(config, None, refine_env.dest)
+        assert "refine_wav" not in refine_env.events
+        assert refine_env.stop_kwargs == [{"rebuild_summary": True}]
+
+    def test_creation_fallback_skips_refine_with_file_hint(self, refine_env):
+        refine_env.engine_errors["mlx"] = FakeUnavailable("no mlx")
+        live_cli.run_live(refine_env.config, None, refine_env.dest)
+        assert "refine_wav" not in refine_env.events
+        assert refine_env.stop_kwargs == [{"rebuild_summary": True}]
+        assert "--file" in refine_env.out.getvalue()
+
+    def test_load_time_fallback_skips_refine(self, refine_env):
+        def start():
+            refine_env.events.append("session.start")
+            engine = refine_env.session_cls.call_args.kwargs["engine"]
+            engine._primary.load.side_effect = FakeUnavailable("download failed")
+            engine.load()
+
+        refine_env.session.start.side_effect = start
+        live_cli.run_live(refine_env.config, None, refine_env.dest)
+        assert "refine_wav" not in refine_env.events
+        text = refine_env.out.getvalue()
+        assert "faster-whisper" in text and "スキップ" in text
+
+    def test_model_fetched_before_recording_when_missing(self, refine_env):
+        refine_env.fetch.cached = False
+        live_cli.run_live(refine_env.config, None, refine_env.dest)
+        assert refine_env.fetch.fetched == ["repo/mlx/large-v3"]
+        assert "refine_wav" in refine_env.events
+
+    def test_fetch_failure_continues_without_refine(self, refine_env):
+        refine_env.fetch.cached = False
+        refine_env.fetch.fetch_error = OSError("net")
+        live_cli.run_live(refine_env.config, None, refine_env.dest)
+        assert "record_audio" in refine_env.events
+        assert "refine_wav" not in refine_env.events
+        assert "取得できませんでした" in refine_env.out.getvalue()
+
+    def test_asr_not_idle_skips_refine(self, refine_env):
+        refine_env.session.wait_asr_idle.side_effect = None
+        refine_env.session.wait_asr_idle.return_value = False
+        live_cli.run_live(refine_env.config, None, refine_env.dest)
+        assert "refine_wav" not in refine_env.events
+        assert "save_live_note" in refine_env.events
+
+    def test_refine_error_keeps_fast_note(self, refine_env, monkeypatch):
+        def broken(*args, **kwargs):
+            raise RuntimeError("secret transcript text")
+
+        monkeypatch.setattr(live_cli, "refine_wav", broken)
+        live_cli.run_live(refine_env.config, None, refine_env.dest)
+        assert refine_env.overwrites == []
+        text = refine_env.out.getvalue()
+        assert "RuntimeError" in text
+        assert "secret transcript text" not in text
+
+    def test_incomplete_refine_keeps_fast_note(self, refine_env, monkeypatch):
+        monkeypatch.setattr(live_cli, "refine_wav", lambda *a, **k: RefineResult((), False, 1.0))
+        live_cli.run_live(refine_env.config, None, refine_env.dest)
+        assert refine_env.overwrites == []
+
+    def test_ctrl_c_cancels_and_keeps_fast_note(self, refine_env, monkeypatch):
+        cancelled: list[bool] = []
+
+        def refine_wav(wav, make_engine, release_live, **kwargs):
+            refine_env.events.append("refine_wav")
+            kwargs["cancel"].wait(timeout=5.0)
+            cancelled.append(kwargs["cancel"].is_set())
+            return RefineResult((), False, 1.0)
+
+        joins = {"n": 0}
+        real_join = live_cli._join_once
+
+        def join_once(worker):
+            joins["n"] += 1
+            if joins["n"] == 1:
+                raise KeyboardInterrupt
+            real_join(worker)
+
+        monkeypatch.setattr(live_cli, "refine_wav", refine_wav)
+        monkeypatch.setattr(live_cli, "_join_once", join_once)
+        live_cli.run_live(refine_env.config, None, refine_env.dest)
+        assert cancelled == [True]
+        assert refine_env.overwrites == []
+        assert "save_live_note" in refine_env.events
+        assert "中断" in refine_env.out.getvalue()
+
+    def test_overwrite_failure_reports_fast_note(self, refine_env, monkeypatch):
+        def broken(*args, **kwargs):
+            raise RuntimeError("保存エラー: disk")
+
+        monkeypatch.setattr(live_cli, "overwrite_live_note", broken)
+        live_cli.run_live(refine_env.config, None, refine_env.dest)
+        assert "速報版" in refine_env.out.getvalue()

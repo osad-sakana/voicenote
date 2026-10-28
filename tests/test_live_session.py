@@ -603,6 +603,45 @@ class TestSummary:
         assert backend.calls >= 2  # 全文要約 + ローリング要約のフォールバック
         assert result.final_summary == ""  # どちらも不採用なので、直前の要約(無し)のまま
 
+    def test_rebuild_summary_false_skips_full_summary(self):
+        """再文字起こしを予定するときは全文要約をせず、ローリング要約だけで締める"""
+        seen: list[str] = []
+
+        class RecordingBackend(FakeBackend):
+            def complete(self, messages):
+                seen.append(messages[0]["content"])
+                return super().complete(messages)
+
+        engine = FakeEngine(responses=["最初の話題です"])
+        session = make_session(engine, backend=RecordingBackend(), clock=FakeClock(0.0))
+        session.start()
+        feed_audio(session, bursts(1))
+        result = session.stop(timeout=WAIT_SEC, rebuild_summary=False)
+        assert result.final_summary == SUMMARY_TEXT
+        assert seen
+        assert all("全体の要約に統合" not in s and "「文字起こし」を読み" not in s for s in seen)
+
+    def test_wait_asr_idle_true_after_stop(self):
+        session = make_session(FakeEngine())
+        session.start()
+        feed_audio(session, bursts(1))
+        session.stop(timeout=WAIT_SEC)
+        assert session.wait_asr_idle(timeout=WAIT_SEC) is True
+
+    def test_wait_asr_idle_true_when_not_started(self):
+        assert make_session(FakeEngine()).wait_asr_idle(timeout=0.0) is True
+
+    def test_wait_asr_idle_false_while_transcribing(self, gates):
+        gate = gates()
+        session = make_session(FakeEngine(responses=[gate]))
+        session.start()
+        feed_audio(session, bursts(1))
+        assert wait_until(lambda: session.backlog_sec > 0)
+        session.stop(timeout=0.2)
+        assert session.wait_asr_idle(timeout=0.1) is False
+        gate.set()
+        assert session.wait_asr_idle(timeout=WAIT_SEC) is True
+
     def test_works_without_backend(self):
         rec = Recorder()
         session = make_session(FakeEngine(), backend=None, rec=rec)
