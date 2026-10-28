@@ -191,6 +191,17 @@ class TestLiveSettings:
         assert settings.llm_model == "qwen2.5:7b"
         assert settings.summary_interval_sec == 45
 
+    def test_refine_defaults(self):
+        settings = LiveSettings.from_config(VoiceNoteConfig())
+        assert settings.refine_enabled is False
+        assert settings.refine_model == "large-v3"
+
+    def test_refine_values_from_config(self):
+        config = VoiceNoteConfig(live_refine_enabled=True, live_refine_model="medium")
+        settings = LiveSettings.from_config(config)
+        assert settings.refine_enabled is True
+        assert settings.refine_model == "medium"
+
     def test_language_is_passed_through(self):
         settings = LiveSettings.from_config(VoiceNoteConfig(live_language="ja"))
         assert settings.language == "ja"
@@ -207,6 +218,11 @@ class TestLiveSettings:
             {"live_language": None},
             {"live_whisper_model": ""},
             {"live_llm_enabled": "yes"},
+            {"live_refine_enabled": "yes"},
+            {"live_refine_enabled": 1},
+            {"live_refine_model": ""},
+            {"live_refine_model": "  "},
+            {"live_refine_model": None},
         ],
     )
     def test_invalid_values_raise(self, overrides):

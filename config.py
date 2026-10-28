@@ -32,6 +32,8 @@ LIVE_VAD_CHOICES = ("silero", "energy")
 DEFAULT_LIVE_LLM_BASE_URL = "http://127.0.0.1:11434/v1"
 DEFAULT_LIVE_LLM_MODEL = "qwen2.5:7b"
 DEFAULT_LIVE_SUMMARY_INTERVAL_SEC = 45
+# 停止後に WAV 全体を再文字起こしする高精度モデル(mlx のみ。turbo ではない large-v3)
+DEFAULT_LIVE_REFINE_MODEL = "large-v3"
 LIVE_ENGINE_CHOICES = {"1": "mlx", "2": "faster-whisper"}
 
 
@@ -59,6 +61,9 @@ class VoiceNoteConfig:
     live_llm_base_url: str = DEFAULT_LIVE_LLM_BASE_URL
     live_llm_model: str = DEFAULT_LIVE_LLM_MODEL
     live_summary_interval_sec: int = DEFAULT_LIVE_SUMMARY_INTERVAL_SEC
+    # 停止後の高精度再文字起こし(mlx 使用時のみ有効)
+    live_refine_enabled: bool = False
+    live_refine_model: str = DEFAULT_LIVE_REFINE_MODEL
 
     @classmethod
     def from_dict(cls, data: dict) -> "VoiceNoteConfig":
@@ -272,7 +277,24 @@ def configure_live_interactive() -> dict:
         "live_language": _ask_live_language(),
         "live_llm_model": _ask_live_llm_model(),
         "live_llm_base_url": _ask_live_base_url(),
+        "live_refine_enabled": _ask_live_refine(engine),
     }
+
+
+def _ask_live_refine(engine: str) -> bool:
+    """停止後に高精度モデルで再文字起こしするか(mlx のときだけ質問する。既定は y)"""
+    if engine != "mlx":
+        return False
+    console.print(
+        f"\n[bold]停止後に {DEFAULT_LIVE_REFINE_MODEL} で WAV 全体を再文字起こしします。[/bold]"
+        "\n  録音と同じくらいの待ち時間と、モデル分のメモリ(約3GB)が必要です。"
+    )
+    answer = Prompt.ask(
+        "[bold]停止後に高精度で再文字起こししますか？[/bold]", choices=["y", "n"], default="y"
+    )
+    enabled = answer == "y"
+    console.print(f"[green]✓ 高精度の再文字起こし: {'有効' if enabled else '無効'}[/green]")
+    return enabled
 
 
 def _ask_live_engine() -> str:

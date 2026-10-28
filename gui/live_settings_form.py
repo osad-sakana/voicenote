@@ -14,7 +14,7 @@ import sys
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 
-from config import VoiceNoteConfig, default_live_model_for
+from config import DEFAULT_LIVE_REFINE_MODEL, VoiceNoteConfig, default_live_model_for
 from live.bootstrap import CPU_UNSUITABLE_MODELS
 from live.engines import ENGINE_FASTER_WHISPER, ENGINE_MLX, MLX_INSTALL_HINT, MLX_MODEL_REPOS
 from live.local_llm import is_loopback_url
@@ -23,6 +23,9 @@ from live.session_models import LiveSettings
 LANGUAGE_AUTO = "自動"
 LANGUAGE_CHOICES = (LANGUAGE_AUTO, "ja", "en")
 LOOPBACK_ONLY_MESSAGE = "ローカルのアドレス（localhost / 127.0.0.1）のみ指定できます"
+REFINE_ONLY_MLX_NOTE = (
+    "mlx 使用時のみ有効。停止後に録音と同程度の待ち時間と、モデル分のメモリが必要です"
+)
 PRIVACY_NOTE = "音声と文字起こしはこのPCの外に送信されません（要約はlocalhostのLLMのみ）"
 
 # 表示順（CLI の --config と同じく mlx を先に出す）
@@ -45,6 +48,8 @@ _FIELD_LABELS = {
     "llm_model": "LLMモデル",
     "base_url": "LLMの接続先URL",
     "summary_interval": "要約間隔（秒）",
+    "refine_enabled": "停止後の高精度再文字起こし",
+    "refine_model": "高精度モデル",
     "settings": "ライブ設定",
 }
 
@@ -61,6 +66,8 @@ class LiveFormValues:
     llm_model: str
     base_url: str
     summary_interval: str
+    refine_enabled: bool = False
+    refine_model: str = DEFAULT_LIVE_REFINE_MODEL
 
 
 @dataclass(frozen=True)
@@ -101,6 +108,8 @@ def form_values_from_config(config: VoiceNoteConfig) -> LiveFormValues:
         llm_model=str(config.live_llm_model),
         base_url=str(config.live_llm_base_url),
         summary_interval=str(config.live_summary_interval_sec),
+        refine_enabled=bool(config.live_refine_enabled),
+        refine_model=str(config.live_refine_model),
     )
 
 
@@ -141,6 +150,9 @@ def _field_overrides(values: LiveFormValues) -> dict | FormError:
     interval = _parse_interval(values.summary_interval)
     if isinstance(interval, FormError):
         return interval
+    refine_model = values.refine_model.strip()
+    if not refine_model:
+        return FormError("refine_model", "高精度モデルを入力してください")
     return {
         "live_engine": values.engine.strip(),
         "live_whisper_model": model,
@@ -150,6 +162,8 @@ def _field_overrides(values: LiveFormValues) -> dict | FormError:
         "live_llm_model": llm_model,
         "live_llm_base_url": base_url,
         "live_summary_interval_sec": interval,
+        "live_refine_enabled": bool(values.refine_enabled),
+        "live_refine_model": refine_model,
     }
 
 
@@ -227,3 +241,8 @@ def model_candidates(engine: str) -> tuple[str, ...]:
     if engine == ENGINE_MLX:
         return tuple(MLX_MODEL_REPOS)
     return FASTER_WHISPER_MODELS
+
+
+def refine_model_candidates() -> tuple[str, ...]:
+    """高精度再文字起こしのモデル候補(mlx の短縮名マップのキー)"""
+    return tuple(MLX_MODEL_REPOS)

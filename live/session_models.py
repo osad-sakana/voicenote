@@ -12,6 +12,7 @@ from config import (
     DEFAULT_LIVE_ENGINE,
     DEFAULT_LIVE_LLM_BASE_URL,
     DEFAULT_LIVE_LLM_MODEL,
+    DEFAULT_LIVE_REFINE_MODEL,
     DEFAULT_LIVE_SUMMARY_INTERVAL_SEC,
     DEFAULT_LIVE_VAD,
     DEFAULT_LIVE_WHISPER_MODEL,
@@ -41,6 +42,8 @@ class LiveSettings:
     segment_queue_size: int = 32  # 文字起こし待ちの区間
     summary_poll_sec: float = 0.5  # 要約スレッドが実行条件を確認する間隔
     poll_sec: float = 0.05  # 各ワーカーがキューを待つ間隔(停止要求への応答性)
+    refine_enabled: bool = False  # 停止後に WAV 全体を高精度モデルで再文字起こしする
+    refine_model: str = DEFAULT_LIVE_REFINE_MODEL
 
     def __post_init__(self):
         _validate_types(self)
@@ -72,6 +75,8 @@ class LiveSettings:
             llm_base_url=config.live_llm_base_url,
             llm_model=config.live_llm_model,
             summary_interval_sec=config.live_summary_interval_sec,
+            refine_enabled=config.live_refine_enabled,
+            refine_model=config.live_refine_model,
         )
 
 
@@ -89,8 +94,11 @@ def _validate_types(settings: LiveSettings) -> None:
         raise ValueError(f"model は空でない文字列が必要です: {settings.model!r}")
     if settings.language is not None and not isinstance(settings.language, str):
         raise ValueError(f"language は文字列が必要です: {settings.language!r}")
-    if not isinstance(settings.llm_enabled, bool):
-        raise ValueError(f"llm_enabled は真偽値が必要です: {settings.llm_enabled!r}")
+    for name in ("llm_enabled", "refine_enabled"):
+        if not isinstance(getattr(settings, name), bool):
+            raise ValueError(f"{name} は真偽値が必要です: {getattr(settings, name)!r}")
+    if not isinstance(settings.refine_model, str) or not settings.refine_model.strip():
+        raise ValueError(f"refine_model は空でない文字列が必要です: {settings.refine_model!r}")
     for name in ("summary_interval_sec", "max_backlog_sec", "summary_poll_sec", "poll_sec"):
         if not _is_number(getattr(settings, name)):
             raise ValueError(f"{name} は数値が必要です: {getattr(settings, name)!r}")
