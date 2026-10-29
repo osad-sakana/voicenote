@@ -177,7 +177,23 @@ class TestFallbackOnLoadEngine:
         engine = FallbackOnLoadEngine(primary, MagicMock, FakeUnavailable, print)
         engine.load()
         assert engine.transcribe("s", "ja") == "p"
-        primary.transcribe.assert_called_once_with("s", "ja")
+        primary.transcribe.assert_called_once_with("s", "ja", prompt=None)
+
+    def test_transcribe_forwards_prompt(self):
+        primary = MagicMock()
+        engine = FallbackOnLoadEngine(primary, MagicMock, FakeUnavailable, print)
+        engine.load()
+        engine.transcribe("s", "ja", prompt="参加者: 田中。")
+        primary.transcribe.assert_called_once_with("s", "ja", prompt="参加者: 田中。")
+
+    def test_transcribe_forwards_prompt_to_fallback(self):
+        primary = MagicMock()
+        primary.load.side_effect = FakeUnavailable("x")
+        fallback = MagicMock()
+        engine = FallbackOnLoadEngine(primary, lambda: fallback, FakeUnavailable, lambda _m: None)
+        engine.load()
+        engine.transcribe("s", None, prompt="用語: 予算。")
+        fallback.transcribe.assert_called_once_with("s", None, prompt="用語: 予算。")
 
     def test_fallback_load_error_propagates(self):
         primary = MagicMock()
@@ -295,3 +311,64 @@ class TestCheckBackend:
         check = BackendCheck(backend=None, status="disabled", message="")
         with pytest.raises(FrozenInstanceError):
             check.status = "ok"  # type: ignore[misc]
+
+
+# --- 実際に動いているエンジン名・解放 ---
+
+
+class TestActiveEngineName:
+    def test_primary_name_before_and_after_successful_load(self):
+        primary = MagicMock()
+        engine = FallbackOnLoadEngine(
+            primary, MagicMock, FakeUnavailable, print, primary_name="mlx"
+        )
+        assert engine.active_engine_name == "mlx"
+        engine.load()
+        assert engine.active_engine_name == "mlx"
+
+    def test_switches_to_fallback_name_after_load_failure(self):
+        primary = MagicMock()
+        primary.load.side_effect = FakeUnavailable("x")
+        engine = FallbackOnLoadEngine(
+            primary, MagicMock, FakeUnavailable, lambda _m: None, primary_name="mlx"
+        )
+        engine.load()
+        assert engine.active_engine_name == FALLBACK_ENGINE
+
+    def test_unload_delegates_to_active_engine(self):
+        primary = MagicMock()
+        primary.load.side_effect = FakeUnavailable("x")
+        fallback = MagicMock()
+        engine = FallbackOnLoadEngine(primary, lambda: fallback, FakeUnavailable, lambda _m: None)
+        engine.load()
+        engine.unload()
+        fallback.unload.assert_called_once()
+        primary.unload.assert_not_called()
+
+    def test_unload_tolerates_engine_without_unload(self):
+        engine = FallbackOnLoadEngine(object(), MagicMock, FakeUnavailable, print)
+        engine.unload()
+
+    def test_build_engine_sets_primary_name(self):
+        engine, _ = _build(LiveSettings(engine="mlx", model=MLX_REPO), EngineFactory(), [])
+        assert engine.active_engine_name == "mlx"
+
+
+class TestEffectiveEngineName:
+    def test_uses_active_engine_name(self):
+        primary = MagicMock()
+        primary.load.side_effect = FakeUnavailable("x")
+        engine = FallbackOnLoadEngine(
+            primary, MagicMock, FakeUnavailable, lambda _m: None, primary_name="mlx"
+        )
+        engine.load()
+        settings = LiveSettings(engine="mlx")
+        assert bootstrap.effective_engine_name(engine, settings) == FALLBACK_ENGINE
+
+    def test_falls_back_to_settings_when_attribute_missing(self):
+        settings = LiveSettings(engine="mlx")
+        assert bootstrap.effective_engine_name(object(), settings) == "mlx"
+
+    def test_ignores_non_string_attribute(self):
+        settings = LiveSettings(engine="faster-whisper")
+        assert bootstrap.effective_engine_name(MagicMock(), settings) == "faster-whisper"

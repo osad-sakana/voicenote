@@ -10,6 +10,7 @@ from config import (
     DEFAULT_LIVE_LLM_BASE_URL,
     DEFAULT_LIVE_LLM_MODEL,
     DEFAULT_LIVE_MLX_WHISPER_MODEL,
+    DEFAULT_LIVE_REFINE_MODEL,
     DEFAULT_LIVE_VAD,
     DEFAULT_LIVE_WHISPER_MODEL,
     InvalidConfigError,
@@ -237,6 +238,8 @@ class TestLiveConfigPersistence:
             live_llm_base_url="http://localhost:8080/v1",
             live_llm_model="qwen3:8b",
             live_summary_interval_sec=60,
+            live_refine_enabled=True,
+            live_refine_model="large-v3-turbo",
         )
         save_config(path, original)
         assert load_config(path) == original
@@ -308,6 +311,65 @@ class TestDefaultLiveModelFor:
         assert (config.live_engine, config.live_whisper_model) == ("faster-whisper", "small")
 
 
+class TestLiveRefineConfig:
+    def test_defaults(self):
+        config = VoiceNoteConfig()
+        assert config.live_refine_enabled is False
+        assert config.live_refine_model == DEFAULT_LIVE_REFINE_MODEL == "large-v3"
+
+    def test_legacy_config_without_refine_keys(self, tmp_path: Path):
+        path = tmp_path / "config.json"
+        path.write_text(
+            json.dumps({"save_folder": "/tmp/x", "live_engine": "mlx"}), encoding="utf-8"
+        )
+        loaded = load_config(path)
+        assert loaded is not None
+        assert loaded.live_refine_enabled is False
+        assert loaded.live_refine_model == "large-v3"
+
+    def test_refine_keys_in_to_dict(self):
+        data = VoiceNoteConfig(live_refine_enabled=True).to_dict()
+        assert data["live_refine_enabled"] is True
+        assert data["live_refine_model"] == "large-v3"
+
+
+def _refine_prompts(monkeypatch, engine_choice: str, refine_answer: str | None):
+    """エンジンだけ選び、再文字起こしの質問に refine_answer(None は既定値)で答えるスタブ"""
+    refine_questions: list[tuple[str, dict]] = []
+    fixed = iter(["y", engine_choice])
+
+    def fake_ask(question, *args, **kwargs):
+        if "高精度" in question:
+            refine_questions.append((question, kwargs))
+            return kwargs["default"] if refine_answer is None else refine_answer
+        try:
+            return next(fixed)
+        except StopIteration:
+            return kwargs.get("default", "")
+
+    monkeypatch.setattr(config_module.Prompt, "ask", staticmethod(fake_ask))
+    return refine_questions
+
+
+class TestConfigureLiveRefine:
+    def test_mlx_asks_and_defaults_to_no(self, monkeypatch):
+        questions = _refine_prompts(monkeypatch, "1", None)
+        overrides = configure_live_interactive()
+        assert len(questions) == 1
+        assert questions[0][1]["default"] == "n"
+        assert overrides["live_refine_enabled"] is False
+
+    def test_mlx_answer_yes(self, monkeypatch):
+        _refine_prompts(monkeypatch, "1", "y")
+        assert configure_live_interactive()["live_refine_enabled"] is True
+
+    def test_faster_whisper_does_not_ask(self, monkeypatch):
+        questions = _refine_prompts(monkeypatch, "2", "y")
+        overrides = configure_live_interactive()
+        assert questions == []
+        assert overrides["live_refine_enabled"] is False
+
+
 class TestConfigureLiveInteractive:
     def test_skip_returns_empty_overrides(self, monkeypatch):
         _fake_prompts(monkeypatch, ["n"])
@@ -316,7 +378,16 @@ class TestConfigureLiveInteractive:
     def test_collects_live_settings(self, monkeypatch):
         _fake_prompts(
             monkeypatch,
-            ["y", "1", "large-v3-turbo", "energy", "ja", "qwen3:8b", "http://localhost:11434/v1"],
+            [
+                "y",
+                "1",
+                "large-v3-turbo",
+                "energy",
+                "ja",
+                "qwen3:8b",
+                "http://localhost:11434/v1",
+                "y",
+            ],
         )
         overrides = configure_live_interactive()
         assert overrides == {
@@ -326,6 +397,7 @@ class TestConfigureLiveInteractive:
             "live_language": "ja",
             "live_llm_model": "qwen3:8b",
             "live_llm_base_url": "http://localhost:11434/v1",
+            "live_refine_enabled": True,
         }
 
     @pytest.mark.parametrize(
@@ -335,7 +407,16 @@ class TestConfigureLiveInteractive:
         defaults: list[str | None] = []
 
         answers = iter(
-            ["y", choice, None, "silero", "", DEFAULT_LIVE_LLM_MODEL, DEFAULT_LIVE_LLM_BASE_URL]
+            [
+                "y",
+                choice,
+                None,
+                "silero",
+                "",
+                DEFAULT_LIVE_LLM_MODEL,
+                DEFAULT_LIVE_LLM_BASE_URL,
+                "n",
+            ]
         )
 
         def fake_ask(question, *args, **kwargs):
@@ -353,7 +434,7 @@ class TestConfigureLiveInteractive:
     def test_blank_model_falls_back_to_engine_default(self, monkeypatch):
         _fake_prompts(
             monkeypatch,
-            ["y", "1", "  ", "silero", "", DEFAULT_LIVE_LLM_MODEL, DEFAULT_LIVE_LLM_BASE_URL],
+            ["y", "1", "  ", "silero", "", DEFAULT_LIVE_LLM_MODEL, DEFAULT_LIVE_LLM_BASE_URL, "y"],
         )
         assert configure_live_interactive()["live_whisper_model"] == "large-v3-turbo"
 

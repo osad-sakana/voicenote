@@ -40,6 +40,12 @@ class TestBuildMessages:
         assert "『現在の話題:』『進捗:』をこの表記のまま" in system
         assert "前回の要約をそのまま返す" in system
 
+    def test_system_prompt_has_grounding_rules(self):
+        system = build_messages("", "発言", max_chars=100)[0]["content"]
+        assert "文字起こしに無い数値・固有名詞・結論・決定事項を足さない" in system
+        assert "不明な点は書かない" in system
+        assert "『現在の話題:』は直近の文字起こしから判断する" in system
+
     def test_empty_prev_summary_is_marked(self):
         user = build_messages("", "発言", max_chars=100)[1]["content"]
         assert "（なし）" in user

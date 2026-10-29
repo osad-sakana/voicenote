@@ -7,6 +7,7 @@ import pytest
 
 from live.local_llm import (
     DEFAULT_BASE_URL,
+    DEFAULT_TEMPERATURE,
     LocalLLMClient,
     ProbeResult,
     is_loopback_url,
@@ -163,11 +164,29 @@ class FakeSDK:
 
 
 class TestLocalLLMClientCalls:
-    def _client_with(self, monkeypatch, sdk):
+    def _client_with(self, monkeypatch, sdk, **kwargs):
         import openai
 
-        monkeypatch.setattr(openai, "OpenAI", lambda **kwargs: sdk)
-        return LocalLLMClient(base_url="http://localhost:11434/v1", model="qwen3:8b")
+        monkeypatch.setattr(openai, "OpenAI", lambda **_: sdk)
+        return LocalLLMClient(base_url="http://localhost:11434/v1", model="qwen3:8b", **kwargs)
+
+    def test_complete_sends_default_low_temperature(self, monkeypatch):
+        sdk = FakeSDK()
+        client = self._client_with(monkeypatch, sdk)
+        client.complete([{"role": "user", "content": "hi"}])
+        assert DEFAULT_TEMPERATURE == 0.2
+        assert sdk.calls[0]["temperature"] == 0.2
+
+    def test_complete_sends_custom_temperature(self, monkeypatch):
+        sdk = FakeSDK()
+        client = self._client_with(monkeypatch, sdk, temperature=0.7)
+        client.complete([{"role": "user", "content": "hi"}])
+        assert sdk.calls[0]["temperature"] == 0.7
+
+    def test_custom_temperature_keeps_loopback_check(self, spy_openai):
+        with pytest.raises(ValueError):
+            LocalLLMClient(base_url="http://evil.com/v1", model="m", temperature=0.5)
+        assert spy_openai.instances == []
 
     def test_complete_sends_model_and_messages(self, monkeypatch):
         sdk = FakeSDK(content="こんにちは")

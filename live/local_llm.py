@@ -21,6 +21,8 @@ from urllib.parse import urlsplit
 
 DEFAULT_BASE_URL = "http://localhost:11434/v1"
 DEFAULT_TIMEOUT_SEC = 60.0
+# 要約は創作より忠実さを優先するため低めの温度にする（入力に無い内容の混入を減らす）
+DEFAULT_TEMPERATURE = 0.2
 _ALLOWED_SCHEMES = frozenset({"http", "https"})
 # Ollama はローカルサーバーでも api_key 引数を要求するSDK仕様のためのダミー値
 _DUMMY_API_KEY = "ollama"
@@ -80,12 +82,19 @@ class ChatBackend(Protocol):
 class LocalLLMClient:
     """ループバック上の OpenAI 互換サーバー（Ollama 等）へ接続するクライアント。"""
 
-    def __init__(self, base_url: str, model: str, timeout: float = DEFAULT_TIMEOUT_SEC):
+    def __init__(
+        self,
+        base_url: str,
+        model: str,
+        timeout: float = DEFAULT_TIMEOUT_SEC,
+        temperature: float = DEFAULT_TEMPERATURE,
+    ):
         """
         Args:
             base_url: OpenAI 互換 API のベース URL（ループバックのみ許可）
             model: 使用するモデル名（例: `qwen3:8b`）
             timeout: HTTP タイムアウト秒数
+            temperature: 生成時の温度（chat completions の temperature）
 
         Raises:
             ValueError: base_url がループバック以外を指している場合
@@ -101,6 +110,7 @@ class LocalLLMClient:
         http_client = httpx.Client(trust_env=False, timeout=timeout, follow_redirects=False)
         self.base_url = base_url
         self.model = model
+        self._temperature = temperature
         self._client = OpenAI(
             base_url=base_url,
             api_key=_DUMMY_API_KEY,
@@ -113,6 +123,7 @@ class LocalLLMClient:
         response = self._client.chat.completions.create(
             model=self.model,
             messages=[dict(m) for m in messages],
+            temperature=self._temperature,
         )
         return response.choices[0].message.content or ""
 

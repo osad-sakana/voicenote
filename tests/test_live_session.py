@@ -85,7 +85,7 @@ class FakeEngine:
         if self._load_error is not None:
             raise self._load_error
 
-    def transcribe(self, samples, language):
+    def transcribe(self, samples, language, prompt=None):
         self.calls += 1
         self.languages.append(language)
         if self._responses:
@@ -191,6 +191,17 @@ class TestLiveSettings:
         assert settings.llm_model == "qwen2.5:7b"
         assert settings.summary_interval_sec == 45
 
+    def test_refine_defaults(self):
+        settings = LiveSettings.from_config(VoiceNoteConfig())
+        assert settings.refine_enabled is False
+        assert settings.refine_model == "large-v3"
+
+    def test_refine_values_from_config(self):
+        config = VoiceNoteConfig(live_refine_enabled=True, live_refine_model="medium")
+        settings = LiveSettings.from_config(config)
+        assert settings.refine_enabled is True
+        assert settings.refine_model == "medium"
+
     def test_language_is_passed_through(self):
         settings = LiveSettings.from_config(VoiceNoteConfig(live_language="ja"))
         assert settings.language == "ja"
@@ -207,6 +218,11 @@ class TestLiveSettings:
             {"live_language": None},
             {"live_whisper_model": ""},
             {"live_llm_enabled": "yes"},
+            {"live_refine_enabled": "yes"},
+            {"live_refine_enabled": 1},
+            {"live_refine_model": ""},
+            {"live_refine_model": "  "},
+            {"live_refine_model": None},
         ],
     )
     def test_invalid_values_raise(self, overrides):
@@ -299,7 +315,7 @@ class TestFiltering:
 
     def test_no_speech_prob_is_respected(self):
         class NoSpeechEngine(FakeEngine):
-            def transcribe(self, samples, language):
+            def transcribe(self, samples, language, prompt=None):
                 return Text("それっぽい文章", no_speech_prob=0.9, avg_logprob=-1.5)
 
         session = make_session(NoSpeechEngine())
@@ -397,7 +413,8 @@ class TestResilience:
         session.start()
         feed_audio(session, bursts(1))
         began = time.monotonic()
-        result = session.stop(timeout=0.5)
+        # 最終要約の上限は timeout(ドレイン)とは別。ここでは短い上限を明示する
+        result = session.stop(timeout=0.5, summary_timeout=0.5)
         assert time.monotonic() - began < 2.0
         assert result.final_summary == ""
 
@@ -537,7 +554,7 @@ class TestSummary:
         feed_audio(session, bursts(1))
         assert wait_until(lambda: len(rec.segments) == 2)
         began = time.monotonic()
-        result = session.stop(timeout=0.5)
+        result = session.stop(timeout=0.5, summary_timeout=0.5)
         assert time.monotonic() - began < 2.0
         assert result.final_summary == SUMMARY_TEXT
         assert any("最終要約が時間内に終わらなかった" in w for w in rec.warnings)
@@ -552,6 +569,232 @@ class TestSummary:
         feed_audio(session, bursts(1))
         result = session.stop(timeout=WAIT_SEC)
         assert result.final_summary == SUMMARY_TEXT
+
+    def test_final_summary_is_built_from_all_segments(self):
+        """停止時の最終要約は、ローリング要約ではなく全セグメントの文字起こしから作る"""
+        seen: list[str] = []
+
+        class RecordingBackend(FakeBackend):
+            def complete(self, messages):
+                seen.append("\n".join(m["content"] for m in messages))
+                return super().complete(messages)
+
+        engine = FakeEngine(responses=["最初の話題です", "二番目の話題です", "三番目の話題です"])
+        session = make_session(
+            engine, backend=RecordingBackend(), clock=FakeClock(0.0), rec=Recorder()
+        )
+        session.start()
+        feed_audio(session, bursts(3))
+        result = session.stop(timeout=WAIT_SEC)
+        assert len(result.segments) == 3
+        assert result.final_summary == SUMMARY_TEXT
+        final_prompt = seen[-1]
+        assert all(
+            t in final_prompt for t in ("最初の話題です", "二番目の話題です", "三番目の話題です")
+        )
+
+    def test_full_summary_failure_falls_back_to_rolling(self):
+        """全文要約が不採用でも、ローリング要約で最終要約を試みる"""
+        backend = FakeBackend(reply="short")  # 日本語として不採用になり、全文要約は None
+        rec = Recorder()
+        session = make_session(FakeEngine(), backend=backend, rec=rec, clock=FakeClock(0.0))
+        session.start()
+        feed_audio(session, bursts(1))
+        result = session.stop(timeout=WAIT_SEC)
+        assert backend.calls >= 2  # 全文要約 + ローリング要約のフォールバック
+        assert result.final_summary == ""  # どちらも不採用なので、直前の要約(無し)のまま
+
+    def test_full_summary_budget_is_independent_of_drain_timeout(self, monkeypatch):
+        """全文要約の上限は stop の timeout(ドレイン)ではなく文字起こしの量に比例させる"""
+        import live.session as session_module
+
+        budgets: list[float] = []
+
+        def fake_summarize_full(backend, texts, context, *, deadline, clock, cancel, on_skip=None):
+            budgets.append(deadline - clock())
+            time.sleep(0.3)  # ドレインの timeout(0.2秒)より長くかかる
+            return SUMMARY_TEXT
+
+        monkeypatch.setattr(session_module, "summarize_full", fake_summarize_full)
+        session = make_session(FakeEngine(), backend=FakeBackend(), clock=FakeClock(0.0))
+        session.start()
+        feed_audio(session, bursts(1))
+        assert wait_until(lambda: session.backlog_sec == 0.0 and session._results)
+        result = session.stop(timeout=0.2)
+        assert result.final_summary == SUMMARY_TEXT
+        assert budgets and budgets[0] > 60.0
+
+    def test_summary_timeout_bounds_summary_and_sets_dedicated_cancel(self, monkeypatch, gates):
+        """時間切れの全文要約には専用の cancel を立て、以降の LLM 呼び出しをさせない"""
+        import live.session as session_module
+
+        gate = gates()
+        seen: list = []
+
+        def fake_summarize_full(backend, texts, context, *, deadline, clock, cancel, on_skip=None):
+            seen.append(cancel)
+            gate.wait(timeout=5.0)
+            return None
+
+        monkeypatch.setattr(session_module, "summarize_full", fake_summarize_full)
+        rec = Recorder()
+        session = make_session(FakeEngine(), backend=FakeBackend(), rec=rec, clock=FakeClock(0.0))
+        session.start()
+        feed_audio(session, bursts(1))
+        assert wait_until(lambda: session.backlog_sec == 0.0 and session._results)
+        began = time.monotonic()
+        session.stop(timeout=WAIT_SEC, summary_timeout=0.3)
+        assert time.monotonic() - began < 2.0
+        assert seen and seen[0].is_set()
+        assert any("全文からの最終要約が時間内に終わらなかった" in w for w in rec.warnings)
+
+    def test_zero_summary_timeout_skips_llm_without_warning(self, gates):
+        """エラー・取り消し経路(summary_timeout=0)は LLM を呼ばずにすぐ戻る"""
+        rec = Recorder()
+        backend = FakeBackend()
+        session = make_session(FakeEngine(), backend=backend, rec=rec, clock=FakeClock(0.0))
+        session.start()
+        feed_audio(session, bursts(1))
+        assert wait_until(lambda: rec.summaries == [SUMMARY_TEXT])
+        backend.gate = gates()  # 以降の呼び出しは返らない
+        baseline = backend.calls
+        began = time.monotonic()
+        result = session.stop(timeout=0.2, summary_timeout=0.0)
+        assert time.monotonic() - began < 0.5
+        assert result.final_summary == SUMMARY_TEXT
+        assert backend.calls == baseline
+        assert not any("最終要約" in w for w in rec.warnings)
+
+    def test_cancel_summary_ends_waiting_stop_quickly(self, gates):
+        """要約待ちの stop は cancel_summary ですぐ戻り、ローリング要約への切り替えもしない"""
+        rec = Recorder()
+        backend = FakeBackend()
+        session = make_session(FakeEngine(), backend=backend, rec=rec, clock=FakeClock(0.0))
+        session.start()
+        feed_audio(session, bursts(1))
+        assert wait_until(lambda: rec.summaries == [SUMMARY_TEXT])
+        backend.gate = gates()
+        baseline = backend.calls
+        results: list = []
+        stopper = threading.Thread(target=lambda: results.append(session.stop(timeout=WAIT_SEC)))
+        stopper.start()
+        assert wait_until(lambda: backend.calls == baseline + 1)  # 全文要約の呼び出し中
+        began = time.monotonic()
+        session.cancel_summary()
+        session.cancel_summary()  # 冪等
+        stopper.join(timeout=2.0)
+        assert not stopper.is_alive()
+        assert time.monotonic() - began < 0.5
+        assert results[0].final_summary == SUMMARY_TEXT
+        assert backend.calls == baseline + 1  # ローリング要約へのフォールバックは呼ばない
+
+    def test_cancel_summary_before_stop(self):
+        backend = FakeBackend()
+        session = make_session(FakeEngine(), backend=backend, clock=FakeClock(0.0))
+        session.start()
+        feed_audio(session, bursts(1))
+        assert wait_until(lambda: backend.calls >= 1)
+        baseline = backend.calls
+        session.cancel_summary()
+        result = session.stop(timeout=WAIT_SEC)
+        assert backend.calls == baseline
+        assert result.final_summary == SUMMARY_TEXT
+
+    def test_full_summary_deadline_counts_from_after_periodic_wait(self, monkeypatch):
+        """周期要約の呼び出し中に停止しても、その待ちの分で全文要約の期限が削られない"""
+        import live.full_summary as full_summary_module
+
+        # 待ち(約2秒)が余裕(1秒)を超えるので、待ちの前から期限を数える旧実装では省かれる
+        monkeypatch.setattr(full_summary_module, "FULL_SUMMARY_MARGIN_SEC", 1.0)
+        rec = Recorder()
+
+        class SlowFirst(FakeBackend):
+            def complete(self, messages):
+                self.calls += 1
+                if self.calls == 1:
+                    time.sleep(2.0)  # 停止時に周期要約が送信中
+                return self.reply
+
+        backend = SlowFirst()
+        session = make_session(FakeEngine(), backend=backend, rec=rec, clock=FakeClock(0.0))
+        session.start()
+        feed_audio(session, bursts(1))
+        assert wait_until(lambda: backend.calls >= 1)
+        result = session.stop(timeout=WAIT_SEC)
+        assert backend.calls >= 2  # 全文要約が実行された
+        assert result.final_summary == SUMMARY_TEXT
+        assert not any("省き" in w for w in rec.warnings)
+
+    def test_skipped_full_summary_is_warned_without_content(self, monkeypatch):
+        """全文要約を省いたら on_warning で知らせる(塊数・秒数のみ、本文は出さない)"""
+        import live.full_summary as full_summary_module
+
+        monkeypatch.setattr(full_summary_module, "FULL_SUMMARY_MARGIN_SEC", -1.0)  # 必ず不足
+        rec = Recorder()
+        engine = FakeEngine(responses=["秘密の発話内容です"])
+        session = make_session(engine, backend=FakeBackend(), rec=rec, clock=FakeClock(0.0))
+        session.start()
+        feed_audio(session, bursts(1))
+        assert wait_until(lambda: len(rec.segments) == 1)
+        session.stop(timeout=WAIT_SEC)
+        skipped = [w for w in rec.warnings if "全文" in w and "省き" in w]
+        assert len(skipped) == 1, rec.warnings
+        assert "1 塊" in skipped[0] and "秒" in skipped[0]
+        assert "秘密" not in skipped[0]
+
+    def test_drain_timeout_still_builds_full_summary_from_collected_segments(
+        self, monkeypatch, gates
+    ):
+        """ドレインが時間切れでも、集まった区間で全文要約を作る(complete=False のまま)"""
+        import live.session as session_module
+
+        calls: list[tuple[str, ...]] = []
+
+        def fake_summarize_full(backend, texts, context, *, deadline, clock, cancel, on_skip=None):
+            calls.append(texts)
+            assert not cancel.is_set()
+            return "現在の話題: 集まった区間の要約"
+
+        monkeypatch.setattr(session_module, "summarize_full", fake_summarize_full)
+        engine = FakeEngine(responses=["最初の発話です", gates()])  # 2区間目で止まる
+        rec = Recorder()
+        session = make_session(engine, backend=FakeBackend(), rec=rec, clock=FakeClock(0.0))
+        session.start()
+        feed_audio(session, bursts(2))
+        assert wait_until(lambda: engine.calls == 2)
+        result = session.stop(timeout=0.3)
+        assert result.complete is False
+        assert calls == [("最初の発話です",)]
+        assert result.final_summary == "現在の話題: 集まった区間の要約"
+
+    def test_rolling_final_summary_returns_before_when_deadline_passed(self):
+        from unittest.mock import MagicMock
+
+        session = make_session(FakeEngine(), backend=FakeBackend())
+        summarizer = MagicMock()
+        assert session._rolling_final_summary(summarizer, "直前", time.monotonic() - 1.0) == "直前"
+        summarizer.maybe_run.assert_not_called()
+
+    def test_wait_asr_idle_true_after_stop(self):
+        session = make_session(FakeEngine())
+        session.start()
+        feed_audio(session, bursts(1))
+        session.stop(timeout=WAIT_SEC)
+        assert session.wait_asr_idle(timeout=WAIT_SEC) is True
+
+    def test_wait_asr_idle_true_when_not_started(self):
+        assert make_session(FakeEngine()).wait_asr_idle(timeout=0.0) is True
+
+    def test_wait_asr_idle_false_while_transcribing(self, gates):
+        gate = gates()
+        session = make_session(FakeEngine(responses=[gate]))
+        session.start()
+        feed_audio(session, bursts(1))
+        assert wait_until(lambda: session.backlog_sec > 0)
+        session.stop(timeout=0.2)
+        assert session.wait_asr_idle(timeout=0.1) is False
+        gate.set()
+        assert session.wait_asr_idle(timeout=WAIT_SEC) is True
 
     def test_works_without_backend(self):
         rec = Recorder()

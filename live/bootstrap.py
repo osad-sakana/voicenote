@@ -65,8 +65,10 @@ class FallbackOnLoadEngine:
         on_fallback,
         *,
         install_hint: str = DEFAULT_INSTALL_HINT,
+        primary_name: str = "mlx",
     ):
         self._primary = primary
+        self._primary_name = primary_name
         self._make_fallback = make_fallback
         self._unavailable_error = unavailable_error
         self._on_fallback = on_fallback
@@ -86,9 +88,30 @@ class FallbackOnLoadEngine:
         fallback.load()
         self._active = fallback
 
-    def transcribe(self, samples, language):
-        """現在有効なエンジンで文字起こしする"""
-        return self._active.transcribe(samples, language)
+    def transcribe(self, samples, language, prompt=None):
+        """現在有効なエンジンで文字起こしする(prompt は用語ヒント)"""
+        return self._active.transcribe(samples, language, prompt=prompt)
+
+    @property
+    def active_engine_name(self) -> str:
+        """実際に動いているエンジン名(load 時に切り替わった後は faster-whisper)"""
+        return self._primary_name if self._active is self._primary else FALLBACK_ENGINE
+
+    def unload(self) -> None:
+        """現在有効なエンジンのモデルを解放する(unload を持たないエンジンは何もしない)"""
+        unload = getattr(self._active, "unload", None)
+        if callable(unload):
+            unload()
+
+
+def effective_engine_name(engine, settings: LiveSettings) -> str:
+    """実際に動いているエンジン名。ラッパーが名前を持たなければ設定のエンジン名
+
+    FallbackOnLoadEngine は load() 内で faster-whisper に切り替わりうるため、
+    settings.engine だけでは判断できない。
+    """
+    name = getattr(engine, "active_engine_name", None)
+    return name if isinstance(name, str) else settings.engine
 
 
 def fallback_model(model: str) -> str:
@@ -151,6 +174,7 @@ def build_engine(
         unavailable_error,
         warn,
         install_hint=install_hint,
+        primary_name=settings.engine,
     )
     return engine, settings
 

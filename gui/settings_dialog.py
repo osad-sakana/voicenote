@@ -17,6 +17,7 @@ from . import theme
 from .live_settings_form import (
     LANGUAGE_CHOICES,
     PRIVACY_NOTE,
+    REFINE_ONLY_MLX_NOTE,
     FormError,
     LiveFormValues,
     cpu_model_warning,
@@ -25,6 +26,7 @@ from .live_settings_form import (
     form_values_from_config,
     model_after_engine_change,
     model_candidates,
+    refine_model_candidates,
     validate_live_form,
 )
 from .segmented import refresh_segment_text
@@ -117,6 +119,7 @@ class _LiveTab:
         self._build_engine(body)
         self._build_whisper(body)
         self._build_llm(body)
+        self._build_refine(body)
         self._load(initial)
 
     def _build_engine(self, body) -> None:
@@ -164,6 +167,22 @@ class _LiveTab:
         self._interval_label = _caption(body, "要約間隔（秒）")
         self._interval_entry = _entry(body)
 
+    def _build_refine(self, body) -> None:
+        _caption(body, "停止後の高精度再文字起こし")
+        self._refine_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(
+            body,
+            text="停止後に WAV 全体を高精度モデルで再文字起こしする",
+            variable=self._refine_var,
+            onvalue=True,
+            offvalue=False,
+            font=theme.font(13),
+        ).pack(fill="x")
+        _caption(body, "高精度モデル")
+        self._refine_model_var = ctk.StringVar()
+        _combobox(body, self._refine_model_var, refine_model_candidates())
+        _note(body).configure(text=REFINE_ONLY_MLX_NOTE)
+
     def _load(self, values: LiveFormValues) -> None:
         # set() は command を呼ばないため、表示の更新は明示的に行う
         if values.engine in self._choices.values:
@@ -178,6 +197,8 @@ class _LiveTab:
         _set_entry(self._llm_model_entry, values.llm_model)
         _set_entry(self._base_url_entry, values.base_url)
         _set_entry(self._interval_entry, values.summary_interval)
+        self._refine_var.set(values.refine_enabled)
+        self._refine_model_var.set(values.refine_model)
         self._refresh_warning()
         self._refresh_llm_state()
 
@@ -211,6 +232,8 @@ class _LiveTab:
             llm_model=self._llm_model_entry.get(),
             base_url=self._base_url_entry.get(),
             summary_interval=self._interval_entry.get(),
+            refine_enabled=bool(self._refine_var.get()),
+            refine_model=self._refine_model_var.get(),
         )
 
 

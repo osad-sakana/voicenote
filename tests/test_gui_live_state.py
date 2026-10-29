@@ -50,7 +50,15 @@ class TestInitialState:
 
     def test_phase_members(self):
         names = {p.name for p in LivePhase}
-        assert names == {"IDLE", "PREPARING", "RECORDING", "FINALIZING", "DRAINING", "SAVING"}
+        assert names == {
+            "IDLE",
+            "PREPARING",
+            "RECORDING",
+            "FINALIZING",
+            "DRAINING",
+            "REFINING",
+            "SAVING",
+        }
 
 
 class TestApplySegment:

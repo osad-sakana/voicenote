@@ -147,3 +147,87 @@ class TestSaveLiveNoteParticipants:
         content = saved.read_text(encoding="utf-8")
         assert content.count("\n---\n") == 1
         assert '  - "x\\n---\\ntype: evil"\n' in content
+
+
+class TestOverwriteLiveNote:
+    def _saved(self, tmp_path: Path) -> Path:
+        return save_live_note(tmp_path, "速報版の本文", participants=("山田",))
+
+    def test_replaces_body_and_adds_refined_tag(self, tmp_path: Path):
+        from note_writer import overwrite_live_note
+
+        path = self._saved(tmp_path)
+        result = overwrite_live_note(path, "高精度版の本文", participants=("山田",), refined=True)
+        assert result == path
+        content = path.read_text(encoding="utf-8")
+        assert "高精度版の本文" in content
+        assert "速報版の本文" not in content
+        assert "  - refined\n" in content
+        assert "type: live-transcription" in content
+        assert 'participants:\n  - "山田"\n' in content
+
+    def test_without_refined_flag_has_no_tag(self, tmp_path: Path):
+        from note_writer import overwrite_live_note
+
+        path = self._saved(tmp_path)
+        overwrite_live_note(path, "本文")
+        assert "refined" not in path.read_text(encoding="utf-8")
+
+    def test_leaves_no_temporary_files(self, tmp_path: Path):
+        from note_writer import overwrite_live_note
+
+        path = self._saved(tmp_path)
+        overwrite_live_note(path, "本文", refined=True)
+        assert sorted(p.name for p in tmp_path.iterdir()) == [path.name]
+
+    def test_keeps_file_mode(self, tmp_path: Path):
+        from note_writer import overwrite_live_note
+
+        path = self._saved(tmp_path)
+        path.chmod(0o644)
+        overwrite_live_note(path, "本文", refined=True)
+        assert path.stat().st_mode & 0o777 == 0o644
+
+    def test_failure_keeps_original_and_cleans_up(self, tmp_path: Path, monkeypatch):
+        import note_writer
+
+        path = self._saved(tmp_path)
+
+        def broken_replace(src, dst):
+            raise OSError("disk error")
+
+        monkeypatch.setattr(note_writer.os, "replace", broken_replace)
+        with pytest.raises(RuntimeError, match="保存エラー"):
+            note_writer.overwrite_live_note(path, "高精度版", refined=True)
+        assert "速報版の本文" in path.read_text(encoding="utf-8")
+        assert sorted(p.name for p in tmp_path.iterdir()) == [path.name]
+
+    def test_missing_target_raises(self, tmp_path: Path):
+        from note_writer import overwrite_live_note
+
+        with pytest.raises(RuntimeError):
+            overwrite_live_note(tmp_path / "missing_live.md", "本文")
+
+
+class TestOverwriteKeepsCreated:
+    def test_keeps_created_of_existing_note(self, tmp_path: Path):
+        from note_writer import overwrite_live_note
+
+        path = save_live_note(tmp_path, "速報版の本文")
+        created_line = next(
+            line
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.startswith("created: ")
+        )
+        overwrite_live_note(path, "高精度版", refined=True)
+        assert created_line in path.read_text(encoding="utf-8").splitlines()
+
+    def test_uses_now_when_created_unreadable(self, tmp_path: Path):
+        from note_writer import overwrite_live_note
+
+        path = tmp_path / "x_live.md"
+        path.write_text("frontmatter なしの本文\ncreated: 偽物\n", encoding="utf-8")
+        overwrite_live_note(path, "高精度版")
+        content = path.read_text(encoding="utf-8")
+        assert "created: 偽物" not in content
+        assert re.search(r"^created: \d{4}-\d{2}-\d{2}T", content, re.MULTILINE)

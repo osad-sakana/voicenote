@@ -22,12 +22,14 @@ class _Inner:
     def __init__(self):
         self.loaded = 0
         self.transcribed = 0
+        self.prompts: list[str | None] = []
 
     def load(self):
         self.loaded += 1
 
-    def transcribe(self, samples, language):
+    def transcribe(self, samples, language, prompt=None):
         self.transcribed += 1
+        self.prompts.append(prompt)
         return "text"
 
 
@@ -67,6 +69,13 @@ class TestSerializedEngineLoad:
         assert inner.transcribed == 1
         assert not lock.locked()
 
+    def test_transcribe_forwards_prompt(self):
+        inner, lock = _Inner(), threading.Lock()
+        engine = SerializedEngine(inner, lock)
+        engine.transcribe(None, "ja", prompt="参加者: 田中。")
+        engine.transcribe(None, "ja")
+        assert inner.prompts == ["参加者: 田中。", None]
+
 
 class TestWorkflowPassesTimeout:
     def test_session_engine_uses_injected_timeout(self, tmp_path):
@@ -102,3 +111,50 @@ class TestSessionWarnsWhenEngineBusy:
         assert result.segments == ()
         assert inner.calls == 0 and inner.load_thread is None
         assert any("前回の処理が終わっていません" in w for w in rec.warnings)
+
+
+class TestSerializedEngineRefineSupport:
+    def test_active_engine_name_is_delegated(self):
+        class _Named(_Inner):
+            active_engine_name = "faster-whisper"
+
+        engine = SerializedEngine(_Named(), threading.Lock())
+        assert engine.active_engine_name == "faster-whisper"
+
+    def test_active_engine_name_none_without_attribute(self):
+        assert SerializedEngine(_Inner(), threading.Lock()).active_engine_name is None
+
+    def test_unload_locked_calls_inner_without_taking_lock(self):
+        unloaded = []
+
+        class _Unloadable(_Inner):
+            def unload(self):
+                unloaded.append(True)
+
+        lock = threading.Lock()
+        engine = SerializedEngine(_Unloadable(), lock)
+        with lock:  # 呼び出し側(RefineRunner)がロックを持ったまま呼ぶ
+            engine.unload_locked()
+        assert unloaded == [True]
+
+    def test_unload_takes_lock(self):
+        unloaded = []
+
+        class _Unloadable(_Inner):
+            def unload(self):
+                unloaded.append(lock.locked())
+
+        lock = threading.Lock()
+        SerializedEngine(_Unloadable(), lock).unload()
+        assert unloaded == [True]
+        assert not lock.locked()
+
+    def test_unload_without_inner_unload_is_noop(self):
+        SerializedEngine(_Inner(), threading.Lock()).unload()
+
+
+def test_refine_banner_and_progress_are_exported():
+    from gui import live_workflow_support as support
+
+    assert support.BANNER_REFINE == "refine"
+    assert "50%" in support.format_refine_progress(30.0, 60.0, 30.0)

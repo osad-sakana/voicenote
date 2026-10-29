@@ -397,3 +397,45 @@ def test_model_candidates_for_faster_whisper():
 
 def test_model_candidates_unknown_engine_falls_back_to_faster_whisper():
     assert model_candidates("unknown") == model_candidates("faster-whisper")
+
+
+# --- 停止後の高精度再文字起こし ---
+
+
+def test_form_values_refine_defaults():
+    values = form_values_from_config(VoiceNoteConfig())
+    assert values.refine_enabled is False
+    assert values.refine_model == "large-v3"
+
+
+def test_form_values_refine_from_config():
+    config = VoiceNoteConfig(live_refine_enabled=True, live_refine_model="medium")
+    values = form_values_from_config(config)
+    assert values.refine_enabled is True
+    assert values.refine_model == "medium"
+
+
+def test_validate_refine_values():
+    overrides = validate_live_form(
+        _values(refine_enabled=True, refine_model=" large-v3 "), _base_config()
+    )
+    assert overrides["live_refine_enabled"] is True
+    assert overrides["live_refine_model"] == "large-v3"
+
+
+def test_validate_rejects_empty_refine_model():
+    error = validate_live_form(_values(refine_model="  "), _base_config())
+    assert isinstance(error, FormError)
+    assert error.field == "refine_model"
+
+
+def test_refine_field_labels():
+    assert field_label("refine_enabled") != "refine_enabled"
+    assert field_label("refine_model") != "refine_model"
+
+
+def test_refine_model_candidates_are_mlx_models():
+    from gui.live_settings_form import REFINE_ONLY_MLX_NOTE, refine_model_candidates
+
+    assert refine_model_candidates() == tuple(MLX_MODEL_REPOS)
+    assert "mlx" in REFINE_ONLY_MLX_NOTE

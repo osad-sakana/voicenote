@@ -79,6 +79,12 @@ class TestButtonSpec:
         assert spec.action is ButtonAction.ABORT
         assert spec.enabled
 
+    def test_refining_aborts_like_draining(self):
+        spec = button_spec(LivePhase.REFINING)
+        assert spec == button_spec(LivePhase.DRAINING)
+        assert spec.text == "中断して保存"
+        assert spec.action is ButtonAction.ABORT
+
     @pytest.mark.parametrize("phase", [LivePhase.FINALIZING, LivePhase.SAVING])
     def test_busy_phases_disabled(self, phase):
         spec = button_spec(phase)
@@ -117,6 +123,14 @@ class TestStatusText:
         text = status_text(phase, "ライブ文字起こし中")
         assert text
         assert text != "ライブ文字起こし中"
+
+    def test_refining_status(self):
+        assert status_text(LivePhase.REFINING, "x") == "高精度で再文字起こし中..."
+
+    def test_refining_locks_controls(self):
+        from gui.live_view_logic import controls_locked
+
+        assert controls_locked(LivePhase.REFINING) is True
 
     def test_preparing_ignores_model_loading_status(self):
         # 準備中は段階の文言を出す(セッション状態は録音中にだけ使う)
@@ -211,6 +225,14 @@ class TestBannerView:
         assert view.visible is True
         assert view.text == "Ollama 不在\nVAD"
         assert view.show_progress is False
+
+    def test_refine_banner_shows_progress(self):
+        from gui.live_workflow import BANNER_REFINE, format_refine_progress
+
+        text = format_refine_progress(30.0, 120.0, 90.0)
+        view = banner_view((LiveBanner(BANNER_REFINE, text),))
+        assert view.show_progress is True
+        assert view.fraction == pytest.approx(0.25)
 
     def test_download_banner_shows_progress(self):
         text = format_download_progress("small", 25, 100)
